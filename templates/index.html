@@ -30,17 +30,59 @@
 <!-- ── Progress bar ───────────────────────────────────────────────────────── -->
 <div id="progressBar" class="progress-bar" style="display:none;"></div>
 
-<!-- ── Main ──────────────────────────────────────────────────────────────── -->
+<!-- ── Main ──────────────────────────────────────────────────── -->
 <main class="main">
+
+  <!-- Stats bar -->
+  <div id="statsBar" class="stats-bar">
+    <div class="stat-card" id="stat-total"     onclick="setFilter('','')"        title="All sessions">
+      <span class="stat-num" id="sn-total">—</span>
+      <span class="stat-lbl">Total</span>
+    </div>
+    <div class="stat-card" id="stat-today"     onclick="setFilter('date','today')" title="Scraped today">
+      <span class="stat-num" id="sn-today">—</span>
+      <span class="stat-lbl">Today</span>
+    </div>
+    <div class="stat-card ok"  id="stat-ok"   onclick="setFilter('status','ok')"      title="No issues">
+      <span class="stat-num" id="sn-ok">—</span>
+      <span class="stat-lbl">✅ OK</span>
+    </div>
+    <div class="stat-card warn" id="stat-warn" onclick="setFilter('status','warning')" title="Minor issues">
+      <span class="stat-num" id="sn-warn">—</span>
+      <span class="stat-lbl">⚠️ Warning</span>
+    </div>
+    <div class="stat-card err"  id="stat-err"  onclick="setFilter('status','error')"   title="Has errors">
+      <span class="stat-num" id="sn-err">—</span>
+      <span class="stat-lbl">❌ Error</span>
+    </div>
+    <div class="stat-card pend" id="stat-pend" onclick="setFilter('status','pending')" title="Not analyzed">
+      <span class="stat-num" id="sn-pend">—</span>
+      <span class="stat-lbl">⏳ Pending</span>
+    </div>
+  </div>
 
   <div class="table-card">
     <div class="table-toolbar">
-      <h2>Last 10 Sessions <span id="sessionCount" class="count-pill">0</span></h2>
-      <div class="legend">
-        <span class="leg ok">✅ OK</span>
-        <span class="leg warning">⚠️ Warning</span>
-        <span class="leg error">❌ Error</span>
-        <span class="leg pending">⏳ Pending</span>
+      <h2>Sessions <span id="sessionCount" class="count-pill">0</span></h2>
+      <div class="toolbar-right">
+        <!-- Search -->
+        <div class="search-wrap">
+          <span class="search-icon">🔍</span>
+          <input id="searchInput" class="search-input" type="text" placeholder="Search session ID…" oninput="onSearch()" />
+          <button id="clearSearch" class="search-clear" onclick="clearSearch()" style="display:none;">✕</button>
+        </div>
+        <!-- Filter chips -->
+        <div class="filter-chips">
+          <button class="chip active" data-filter="" onclick="setDateChip(this,'')">All time</button>
+          <button class="chip" data-filter="today" onclick="setDateChip(this,'today')">Today</button>
+          <button class="chip" data-filter="week"  onclick="setDateChip(this,'week')">7 days</button>
+        </div>
+        <div class="legend">
+          <span class="leg ok">✅ OK</span>
+          <span class="leg warning">⚠️ Warning</span>
+          <span class="leg error">❌ Error</span>
+          <span class="leg pending">⏳ Pending</span>
+        </div>
       </div>
     </div>
 
@@ -59,7 +101,13 @@
     <div id="sessionRows"></div>
 
     <div id="emptyState" class="empty-state" style="display:none;">
-      <p>No sessions yet. Click <strong>Refresh</strong> to load data.</p>
+      <p>No sessions found. Try adjusting your filters or click <strong>Refresh</strong>.</p>
+    </div>
+
+    <!-- Load more / pagination -->
+    <div id="loadMoreWrap" class="load-more-wrap" style="display:none;">
+      <button id="loadMoreBtn" class="btn-load-more" onclick="loadMore()">Load more</button>
+      <span id="loadMoreInfo" class="load-more-info"></span>
     </div>
   </div>
 
@@ -94,19 +142,14 @@
 <script>
   // ── Dark mode ──────────────────────────────────────────────────────────────
   (function initDark() {
-    if (localStorage.getItem('darkMode') === '1') {
-      document.body.classList.add('dark');
-    }
+    if (localStorage.getItem('darkMode') === '1') document.body.classList.add('dark');
   })();
-
   function toggleDark() {
     const isDark = document.body.classList.toggle('dark');
     localStorage.setItem('darkMode', isDark ? '1' : '0');
     document.getElementById('darkIcon').textContent  = isDark ? '☀️' : '🌙';
     document.getElementById('darkLabel').textContent = isDark ? 'Light' : 'Dark';
   }
-
-  // sync button label on page load
   window.addEventListener('DOMContentLoaded', function() {
     if (document.body.classList.contains('dark')) {
       document.getElementById('darkIcon').textContent  = '☀️';
@@ -114,12 +157,21 @@
     }
   });
 
-  let sessions = [];
-  let polling = null;
-  let analyzingId = null;  // only one analysis at a time
+  // ── State ──────────────────────────────────────────────────────────────────
+  let sessions     = [];
+  let polling      = null;
+  let analyzingId  = null;
+  let currentOffset = 0;
+  let currentTotal  = 0;
+  let hasMore       = false;
+  const PAGE_SIZE   = 25;
+
+  // Active filters
+  let fSearch = '';
+  let fStatus = '';   // ok | warning | error | pending | ''
+  let fDate   = '';   // today | week | ''
 
   const SVC_ICONS = { hotel:'🏨', flight:'✈️', visa:'📄', transfer:'🚗' };
-
   const AI_CFG = {
     ok:      { icon:'✅', cls:'ai-ok',      label:'OK' },
     warning: { icon:'⚠️', cls:'ai-warning', label:'Warning' },
@@ -127,18 +179,145 @@
     pending: { icon:'⏳', cls:'ai-pending', label:'Pending' },
   };
 
-  // ── Data loading ────────────────────────────────────────────────────────────
-  async function loadSessions() {
+  // ── Stats ──────────────────────────────────────────────────────────────────
+  async function loadStats() {
     try {
-      const r = await fetch('/api/sessions');
-      const d = await r.json();
-      sessions = d.sessions || [];
+      const d = await fetch('/api/stats').then(r => r.json());
+      document.getElementById('sn-total').textContent = d.total  ?? '—';
+      document.getElementById('sn-today').textContent = d.today  ?? '—';
+      document.getElementById('sn-ok').textContent    = d.ok     ?? '—';
+      document.getElementById('sn-warn').textContent  = d.warning ?? '—';
+      document.getElementById('sn-err').textContent   = d.error  ?? '—';
+      document.getElementById('sn-pend').textContent  = d.pending ?? '—';
+    } catch(e) { console.error('Stats error', e); }
+  }
+
+  // ── Filter helpers ─────────────────────────────────────────────────────────
+  function setFilter(type, value) {
+    if (type === 'status') { fStatus = fStatus === value ? '' : value; fDate = ''; }
+    if (type === 'date')   { fDate   = fDate   === value ? '' : value; fStatus = ''; }
+    if (type === '')       { fStatus = ''; fDate = ''; }
+    syncChips();
+    resetAndLoad();
+  }
+
+  function setDateChip(btn, value) {
+    fDate = value; fStatus = '';
+    document.querySelectorAll('.filter-chips .chip').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    resetAndLoad();
+  }
+
+  let _searchTimer = null;
+  function onSearch() {
+    fSearch = document.getElementById('searchInput').value.trim();
+    document.getElementById('clearSearch').style.display = fSearch ? 'block' : 'none';
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(resetAndLoad, 350);
+  }
+  function clearSearch() {
+    document.getElementById('searchInput').value = '';
+    fSearch = '';
+    document.getElementById('clearSearch').style.display = 'none';
+    resetAndLoad();
+  }
+
+  function syncChips() {
+    // Highlight stat cards
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active-filter'));
+    if (fStatus === 'ok')      document.getElementById('stat-ok').classList.add('active-filter');
+    if (fStatus === 'warning') document.getElementById('stat-warn').classList.add('active-filter');
+    if (fStatus === 'error')   document.getElementById('stat-err').classList.add('active-filter');
+    if (fStatus === 'pending') document.getElementById('stat-pend').classList.add('active-filter');
+    if (fDate   === 'today')   document.getElementById('stat-today').classList.add('active-filter');
+    // Sync date chips
+    document.querySelectorAll('.filter-chips .chip').forEach(c => {
+      c.classList.toggle('active', c.dataset.filter === fDate && !fStatus);
+    });
+  }
+
+  function resetAndLoad() {
+    currentOffset = 0;
+    sessions = [];
+    loadSessions(false);
+  }
+
+  // ── Data loading ────────────────────────────────────────────────────────────
+  async function loadSessions(append = false) {
+    // Non-append always starts from page 1 so auto-refresh shows freshest data
+    if (!append) currentOffset = 0;
+    try {
+      const params = new URLSearchParams({
+        limit:  PAGE_SIZE,
+        offset: currentOffset,
+        search: fSearch,
+        status: fStatus,
+        date:   fDate,
+      });
+      const d = await fetch(`/api/db/sessions?${params}`).then(r => r.json());
+
+      // Normalize DB row → same shape the UI expects
+      // Preserve in-memory analysis if DB hasn't synced it yet (race guard)
+      const normalized = (d.sessions || []).map(s => {
+        const nr = normRow(s);
+        if (!nr.analysis) {
+          const cached = sessions.find(x => x.session_id === s.session_id);
+          if (cached && cached.analysis) nr.analysis = cached.analysis;
+        }
+        return nr;
+      });
+
+      if (append) {
+        sessions = [...sessions, ...normalized];
+      } else {
+        sessions = normalized;
+      }
+      currentTotal = d.total || 0;
+      hasMore      = d.has_more || false;
+      currentOffset = sessions.length;
+
       renderTable(sessions);
-      document.getElementById('sessionCount').textContent = sessions.length;
-      document.getElementById('lastUpdate').textContent =
-        'Updated ' + new Date().toLocaleTimeString();
-    } catch (e) {
-      console.error('Load error', e);
+      document.getElementById('sessionCount').textContent = currentTotal;
+      document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+      updateLoadMore();
+    } catch(e) { console.error('Load error', e); }
+  }
+
+  function normRow(s) {
+    // DB rows use flat columns; UI expects nested analysis object
+    if (s.analysis) return s;  // already nested (from cache fallback)
+    return {
+      ...s,
+      analysis: s.analysis_status ? {
+        overall_status:  s.analysis_status,
+        summary:         s.analysis_summary,
+        issues:          s.analysis_issues || [],
+        extractor_rating: s.extractor_rating,
+        rating_reason:   s.rating_reason,
+        analyzed_at:     s.analyzed_at,
+      } : null,
+    };
+  }
+
+  async function loadMore() {
+    document.getElementById('loadMoreBtn').textContent = 'Loading…';
+    document.getElementById('loadMoreBtn').disabled = true;
+    await loadSessions(true);
+    document.getElementById('loadMoreBtn').textContent = 'Load more';
+    document.getElementById('loadMoreBtn').disabled = false;
+  }
+
+  function updateLoadMore() {
+    const wrap = document.getElementById('loadMoreWrap');
+    const info = document.getElementById('loadMoreInfo');
+    if (hasMore) {
+      wrap.style.display = 'flex';
+      info.textContent = `Showing ${sessions.length} of ${currentTotal}`;
+    } else {
+      wrap.style.display = sessions.length > 0 ? 'flex' : 'none';
+      wrap.querySelector('button').style.display = 'none';
+      if (sessions.length > 0)
+        info.textContent = `All ${currentTotal} session${currentTotal !== 1 ? 's' : ''} shown`;
     }
   }
 
@@ -146,49 +325,50 @@
   function renderTable(list) {
     const container = document.getElementById('sessionRows');
     const empty     = document.getElementById('emptyState');
-
-    if (!list.length) {
-      container.innerHTML = '';
-      empty.style.display = 'flex';
-      return;
-    }
+    if (!list.length) { container.innerHTML = ''; empty.style.display = 'flex'; return; }
     empty.style.display = 'none';
 
     container.innerHTML = list.map(s => {
-      const analysis  = s.analysis || {};
+      const analysis = s.analysis || {};
       const isAnalysisError = analysis.overall_status === 'error' && (analysis.summary || '').startsWith('Analysis error:');
       const hasRealAI = ['ok','warning','error'].includes(analysis.overall_status) && !isAnalysisError;
-      const aiKey     = hasRealAI ? analysis.overall_status : (isAnalysisError || s.scrape_error ? 'error' : 'pending');
-      const cfg       = AI_CFG[aiKey] || AI_CFG.pending;
-      const issues    = analysis.issues || [];
-      const summary   = analysis.summary
-        || (s.scrape_error ? '⚠ Scrape error: ' + s.scrape_error : '—');
-      const services  = (s.services || [])
-        .map(sv => `<span title="${sv}">${SVC_ICONS[sv] || sv}</span>`).join('');
+      const aiKey  = hasRealAI ? analysis.overall_status : (isAnalysisError || s.scrape_error ? 'error' : 'pending');
+      const cfg    = AI_CFG[aiKey] || AI_CFG.pending;
+      const issues = analysis.issues || [];
+      const summary = analysis.summary || (s.scrape_error ? '⚠ Scrape error: ' + s.scrape_error : '—');
+      const services = (s.services || []).map(sv => `<span title="${sv}">${SVC_ICONS[sv]||sv}</span>`).join('');
       const statusCls = (s.status||'').toLowerCase() === 'completed' ? 'completed' : 'active';
-      const time      = s.scraped_at ? new Date(s.scraped_at).toLocaleString() : '—';
+      const time = s.scraped_at ? new Date(s.scraped_at).toLocaleString() : '—';
+      const rating = analysis.extractor_rating;
+      const ratingHtml = (rating != null && hasRealAI)
+        ? `<span class="rating-pill ${rating>=8?'r-good':rating>=5?'r-mid':'r-low'}">${rating}/10</span>` : '';
+      const shortId = s.session_id.slice(0,8) + '…';
 
-      const hasData = (s.conversation && s.conversation.length > 0) || s.result_json;
+      // Determine action button — note: DB sessions may lack conversation, so check hasData carefully
+      const hasData = s.conversation_count > 0 || s.msg_count > 0 || s.result_json || (s.conversation && s.conversation.length > 0);
       let actionBtn;
-      if (!hasData) {
+      if (!hasData && !hasRealAI) {
         actionBtn = `<span class="no-action" title="No conversation data">—</span>`;
       } else if (hasRealAI) {
-        actionBtn = `<button class="btn-view" onclick="event.stopPropagation(); openDetail('${s.session_id}')">👁 View</button>`;
+        actionBtn = `<button class="btn-view" onclick="event.stopPropagation();openDetail('${s.session_id}')">👁 View</button>`;
       } else if (analyzingId === s.session_id) {
         actionBtn = `<button class="btn-analyze" disabled>⏳</button>`;
       } else {
         const isLocked = analyzingId !== null;
         const label = isAnalysisError ? '🔄 Retry' : '🔍 Analyze';
-        actionBtn = `<button class="btn-analyze" id="abtn-${s.session_id}" ${isLocked ? 'disabled' : ''} onclick="event.stopPropagation(); runAnalyze('${s.session_id}')">${label}</button>`;
+        actionBtn = `<button class="btn-analyze" id="abtn-${s.session_id}" ${isLocked?'disabled':''} onclick="event.stopPropagation();runAnalyze('${s.session_id}')">${label}</button>`;
       }
 
       return `
       <div class="tbl-row" onclick="openDetail('${s.session_id}')">
-        <span class="sid" title="${s.session_id}">${s.session_id.slice(0,8)}…</span>
-        <span><span class="badge ${statusCls}">${s.status || '—'}</span></span>
-        <span class="svc-cell">${services || '—'}</span>
-        <span><span class="ai-badge ${cfg.cls}">${cfg.icon} ${cfg.label}</span></span>
-        <span class="issue-cnt ${issues.length ? 'has-issues' : ''}">${issues.length}</span>
+        <span class="sid-wrap">
+          <span class="sid" title="${s.session_id}">${shortId}</span>
+          <button class="copy-btn" title="Copy session ID" onclick="event.stopPropagation();copyId('${s.session_id}',this)">⧉</button>
+        </span>
+        <span><span class="badge ${statusCls}">${s.status||'—'}</span></span>
+        <span class="svc-cell">${services||'—'}</span>
+        <span><span class="ai-badge ${cfg.cls}">${cfg.icon} ${cfg.label}</span>${ratingHtml}</span>
+        <span class="issue-cnt ${issues.length?'has-issues':''}">${issues.length}</span>
         <span class="summary-cell" title="${esc(summary)}">${esc(summary).slice(0,65)}${summary.length>65?'…':''}</span>
         <span class="time-cell">${time}</span>
         <span onclick="event.stopPropagation()">${actionBtn}</span>
@@ -196,113 +376,122 @@
     }).join('');
   }
 
-  // ── Shared analyze core ─────────────────────────────────────────────────────
+  // ── Copy session ID ─────────────────────────────────────────────────────────
+  function copyId(id, btn) {
+    navigator.clipboard.writeText(id).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = '✓';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+    });
+  }
+
+  // ── Analyze ─────────────────────────────────────────────────────────────────
   async function _doAnalyze(sessionId, { fromPanel = false } = {}) {
     if (analyzingId) return;
     analyzingId = sessionId;
     renderTable(sessions);
-
-    // If triggered from the panel, re-render the analysis tab to show spinner
     if (fromPanel) {
       const s = sessions.find(x => x.session_id === sessionId);
       if (s) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(s);
     }
-
     try {
-      const r = await fetch(`/api/analyze/${sessionId}`, { method: 'POST' });
-      const d = await r.json();
-
+      const d = await fetch(`/api/analyze/${sessionId}`, { method: 'POST' }).then(r => r.json());
       const s = sessions.find(x => x.session_id === sessionId);
       if (s && d.analysis) s.analysis = d.analysis;
-
       analyzingId = null;
       renderTable(sessions);
-
-      // Always refresh panel if it's open for this session
+      loadStats();
       const panelId = document.getElementById('dpSessionId').textContent;
       if (panelId === sessionId && document.getElementById('detailPanel').classList.contains('open')) {
         openDetail(sessionId);
       } else if (!fromPanel) {
         openDetail(sessionId);
       }
-
-    } catch (e) {
-      analyzingId = null;
-      renderTable(sessions);
-    }
+    } catch(e) { analyzingId = null; renderTable(sessions); }
   }
+  async function runAnalyze(id) { await _doAnalyze(id, { fromPanel: false }); }
+  async function runAnalyzeFromPanel(id) { await _doAnalyze(id, { fromPanel: true }); }
 
-  // Called from table row button
-  async function runAnalyze(sessionId) { await _doAnalyze(sessionId, { fromPanel: false }); }
-
-  // Called from side panel button — keeps panel open, shows spinner in-place
-  async function runAnalyzeFromPanel(sessionId) { await _doAnalyze(sessionId, { fromPanel: true }); }
-
-  // ── Refresh (scrape only) ───────────────────────────────────────────────────
+  // ── Refresh ──────────────────────────────────────────────────────────────────
   async function triggerRefresh() {
-    const btn   = document.getElementById('refreshBtn');
+    const btn = document.getElementById('refreshBtn');
     const badge = document.getElementById('statusBadge');
     if (btn.disabled) return;
-
     btn.disabled = true;
     btn.innerHTML = '<span class="spin">🔄</span> Scraping…';
     badge.className = 'job-badge running';
     badge.textContent = '● Scraping';
     document.getElementById('progressBar').style.display = 'block';
-
     try {
       await fetch('/api/refresh', { method: 'POST' });
       startPolling();
-    } catch (e) {
-      stopRefreshing();
-    }
+    } catch(e) { stopRefreshing(); }
   }
 
   function startPolling() {
     if (polling) clearInterval(polling);
     polling = setInterval(async () => {
-      await loadSessions();
-      try {
-        const r = await fetch('/api/status');
-        const d = await r.json();
-        if (!d.running) stopRefreshing();
-      } catch (e) {
-        stopRefreshing();
-      }
+      await loadSessions(false);
+      const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
+      if (!d.running) stopRefreshing();
     }, 3000);
     setTimeout(stopRefreshing, 180000);
   }
 
   function stopRefreshing() {
     if (polling) { clearInterval(polling); polling = null; }
-    const btn   = document.getElementById('refreshBtn');
-    const badge = document.getElementById('statusBadge');
+    const btn = document.getElementById('refreshBtn');
     btn.disabled = false;
     btn.innerHTML = '<span>🔄</span> Refresh';
-    badge.className = 'job-badge idle';
-    badge.textContent = '● Idle';
+    document.getElementById('statusBadge').className = 'job-badge idle';
+    document.getElementById('statusBadge').textContent = '● Idle';
     document.getElementById('progressBar').style.display = 'none';
-    loadSessions();
+    loadSessions(false);
+    loadStats();
   }
 
-  // ── Detail panel ────────────────────────────────────────────────────────────
-  function openDetail(sessionId) {
-    const s = sessions.find(x => x.session_id === sessionId);
+  // ── Detail panel ─────────────────────────────────────────────────────────────
+  async function openDetail(sessionId) {
+    let s = sessions.find(x => x.session_id === sessionId);
+
+    // DB list rows omit conversation/result_json — always fetch full record if missing
+    if (s && !s.conversation && !s.result_json) {
+      // Show panel immediately with a loading state while we fetch
+      document.getElementById('dpSessionId').textContent = sessionId;
+      document.getElementById('tabConversation').innerHTML = '<p class="no-data">Loading…</p>';
+      document.getElementById('tabResultJson').innerHTML  = '<p class="no-data">Loading…</p>';
+      document.getElementById('tabAnalysis').innerHTML    = buildAnalysis(s);
+      document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
+      document.querySelector('.dtab[data-tab="analysis"]').classList.add('active');
+      document.querySelectorAll('.tab-pane').forEach(p => p.style.display = 'none');
+      document.getElementById('tabAnalysis').style.display = 'block';
+      document.getElementById('detailPanel').classList.add('open');
+      document.getElementById('overlay').classList.add('open');
+      document.body.style.overflow = 'hidden';
+
+      try {
+        const full = await fetch(`/api/db/sessions/${sessionId}`).then(r => r.json());
+        if (full && full.session_id) {
+          const normalized = normRow(full);
+          s = normalized;
+          const idx = sessions.findIndex(x => x.session_id === sessionId);
+          if (idx >= 0) sessions[idx] = normalized;
+        }
+      } catch(e) { /* fall through with what we have */ }
+    }
     if (!s) return;
 
     document.getElementById('dpSessionId').textContent = sessionId;
-
     document.getElementById('tabAnalysis').innerHTML    = buildAnalysis(s);
     document.getElementById('tabConversation').innerHTML = buildConversation(s.conversation || []);
     document.getElementById('tabResultJson').innerHTML  =
       `<pre>${esc(JSON.stringify(s.result_json || {}, null, 2))}</pre>`;
 
-    // Default to analysis tab
     document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
     document.querySelector('.dtab[data-tab="analysis"]').classList.add('active');
     document.querySelectorAll('.tab-pane').forEach(p => p.style.display = 'none');
     document.getElementById('tabAnalysis').style.display = 'block';
-
     document.getElementById('detailPanel').classList.add('open');
     document.getElementById('overlay').classList.add('open');
     document.body.style.overflow = 'hidden';
@@ -323,28 +512,28 @@
   }
 
   function buildAnalysis(s) {
-    const analysis  = s.analysis || {};
+    const analysis = s.analysis || {};
     const isAnalysisError = analysis.overall_status === 'error' && (analysis.summary || '').startsWith('Analysis error:');
     const hasRealAI = ['ok','warning','error'].includes(analysis.overall_status) && !isAnalysisError;
-    const status    = hasRealAI ? analysis.overall_status : (isAnalysisError ? 'error' : 'pending');
-    const cfg       = AI_CFG[status] || AI_CFG.pending;
-    const issues    = analysis.issues || [];
-    const hasData   = (s.conversation && s.conversation.length > 0) || s.result_json;
+    const status = hasRealAI ? analysis.overall_status : (isAnalysisError ? 'error' : 'pending');
+    const cfg = AI_CFG[status] || AI_CFG.pending;
+    const issues = analysis.issues || [];
+    const hasData = (s.conversation && s.conversation.length > 0) || s.result_json || s.msg_count > 0;
 
     if (!hasRealAI) {
       const isAnalyzing = analyzingId === s.session_id;
       return `
       <div class="not-analyzed-box">
-        <div style="font-size:32px; margin-bottom:12px;">${isAnalysisError ? '❌' : '🔍'}</div>
+        <div style="font-size:32px;margin-bottom:12px;">${isAnalysisError ? '❌' : '🔍'}</div>
         ${hasData
           ? isAnalyzing
             ? `<p>Analyzing…</p><button class="btn-analyze-lg" disabled><span class="spin">⏳</span> Running…</button>`
             : isAnalysisError
               ? `<p style="color:#ef4444;">Previous analysis failed:<br><code style="font-size:12px">${esc(analysis.summary)}</code></p>
-                 <button class="btn-analyze-lg" id="panel-analyze-btn" onclick="runAnalyzeFromPanel('${s.session_id}')">🔄 Retry Analysis</button>`
+                 <button class="btn-analyze-lg" onclick="runAnalyzeFromPanel('${s.session_id}')">🔄 Retry Analysis</button>`
               : `<p>This session hasn't been analyzed yet.</p>
-                 <button class="btn-analyze-lg" id="panel-analyze-btn" onclick="runAnalyzeFromPanel('${s.session_id}')">Run AI Analysis</button>`
-          : `<p style="color:#94a3b8;">No conversation or result data available to analyze.</p>`
+                 <button class="btn-analyze-lg" onclick="runAnalyzeFromPanel('${s.session_id}')">Run AI Analysis</button>`
+          : `<p style="color:var(--text4);">No conversation or result data available.</p>`
         }
       </div>`;
     }
@@ -352,26 +541,35 @@
     let html = `
     <div class="summary-box ${cfg.cls}">
       <span class="summary-icon">${cfg.icon}</span>
-      <div>
-        <strong>Overall: ${cfg.label}</strong>
-        <p>${esc(analysis.summary || 'No summary.')}</p>
-      </div>
+      <div><strong>Overall: ${cfg.label}</strong><p>${esc(analysis.summary||'No summary.')}</p></div>
     </div>`;
 
-    if (s.scrape_error) {
-      html += `<div class="alert-box">⚠️ Scrape error: ${esc(s.scrape_error)}</div>`;
+    if (analysis.extractor_rating != null) {
+      const r = analysis.extractor_rating;
+      const rCls = r>=8?'r-good':r>=5?'r-mid':'r-low';
+      html += `
+    <div class="rating-box">
+      <div class="rating-header">
+        <span class="rating-label">🎯 Extractor Accuracy</span>
+        <span class="rating-pill ${rCls}" style="font-size:13px;padding:4px 12px;">${r}/10</span>
+      </div>
+      <div class="rating-bar-track"><div class="rating-bar-fill ${rCls}" style="width:${r*10}%"></div></div>
+      ${analysis.rating_reason ? `<p class="rating-reason">${esc(analysis.rating_reason)}</p>` : ''}
+    </div>`;
     }
+
+    if (s.scrape_error) html += `<div class="alert-box">⚠️ Scrape error: ${esc(s.scrape_error)}</div>`;
 
     if (issues.length) {
       html += `<h4 class="issues-heading">Issues Found (${issues.length})</h4>`;
       html += issues.map(issue => `
-      <div class="issue-card sev-${issue.severity || 'medium'}">
+      <div class="issue-card sev-${issue.severity||'medium'}">
         <div class="issue-meta">
-          <span class="issue-type">${issue.type || 'issue'}</span>
-          <span class="issue-sev sev-${issue.severity}">${issue.severity || 'medium'}</span>
+          <span class="issue-type">${issue.type||'issue'}</span>
+          <span class="issue-sev sev-${issue.severity}">${issue.severity||'medium'}</span>
         </div>
-        <div class="issue-field"><strong>Field:</strong> <code>${esc(issue.field || '—')}</code></div>
-        <div class="issue-desc">${esc(issue.description || '')}</div>
+        <div class="issue-field"><strong>Field:</strong> <code>${esc(issue.field||'—')}</code></div>
+        <div class="issue-desc">${esc(issue.description||'')}</div>
         ${issue.expected ? `<div class="issue-exp"><strong>Expected:</strong> ${esc(issue.expected)}</div>` : ''}
         ${issue.actual   ? `<div class="issue-act"><strong>Actual:</strong> ${esc(String(issue.actual))}</div>` : ''}
       </div>`).join('');
@@ -382,11 +580,11 @@
   }
 
   function buildConversation(messages) {
-    if (!messages.length) return '<p class="no-data">No conversation data.</p>';
+    if (!messages || !messages.length) return '<p class="no-data">No conversation data.</p>';
     return messages.map(m => {
       const isBot = m.role.toLowerCase().includes('assistant');
-      return `<div class="msg ${isBot ? 'bot' : 'user'}">
-        <div class="msg-role">${isBot ? '🤖 Assistant' : '👤 User'}</div>
+      return `<div class="msg ${isBot?'bot':'user'}">
+        <div class="msg-role">${isBot?'🤖 Assistant':'👤 User'}</div>
         <div class="msg-text">${esc(m.text)}</div>
       </div>`;
     }).join('');
@@ -398,9 +596,10 @@
     return d.innerHTML;
   }
 
-  // ── Boot ────────────────────────────────────────────────────────────────────
-  loadSessions();
-  setInterval(loadSessions, 60000);
+  // ── Boot ─────────────────────────────────────────────────────────────────────
+  loadStats();
+  loadSessions(false);
+  setInterval(() => { loadSessions(false); loadStats(); }, 60000);
 </script>
 
 </body>

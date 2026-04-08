@@ -1,8 +1,9 @@
 import logging
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -22,8 +23,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.scheduler import start_scheduler, stop_scheduler
+    from app.database import check_table
     t = threading.Thread(target=start_scheduler, daemon=True)
     t.start()
+    check_table()   # logs warning if migration hasn't been run yet
     yield
     stop_scheduler()
 
@@ -90,6 +93,7 @@ async def analyze_one(session_id: str):
         return {'error': 'No conversation or result data to analyze', 'session_id': session_id}
 
     analysis = analyze_session(session)
+    analysis['analyzed_at'] = datetime.now(timezone.utc).isoformat()
     session['analysis'] = analysis
     save_session(session_id, session)
     logger.info(
@@ -116,9 +120,91 @@ async def refresh():
 async def status():
     """Return whether the scrape job is currently running."""
     from app.scheduler import is_job_running, get_last_run
+    from app.database import is_available
     return {
         'running': is_job_running(),
         'last_run': get_last_run(),
+        'db_connected': is_available(),
+    }
+
+
+# ── DB API endpoints ──────────────────────────────────────────────────────────
+
+@app.get('/api/db/setup')
+async def db_setup_sql():
+    """Return the SQL migration to run in Supabase SQL Editor (one-time setup)."""
+    from pathlib import Path
+    sql_file = Path(__file__).parent / 'migrations' / '001_create_sessions.sql'
+    sql = sql_file.read_text() if sql_file.exists() else '-- migration file not found'
+    return {
+        'sql_editor_url': 'https://supabase.com/dashboard/project/dqjtorcujhauozenfvch/sql/new',
+        'sql': sql,
+    }
+
+
+@app.get('/api/db/sessions')
+async def db_sessions(
+    limit: int = 50,
+    offset: int = 0,
+    search: str = '',
+    status: str = '',          # analysis status filter: ok|warning|error|pending
+    date: str = '',            # today|week
+    session_status: str = '',  # completed|active
+):
+    """
+    Paginated, filterable session list from Supabase.
+    Params: limit, offset, search, status, date (today|week), session_status
+    """
+    from app.database import get_all_sessions_db
+    sessions_list, total = get_all_sessions_db(
+        limit=limit, offset=offset,
+        search=search, status_filter=status,
+        date_filter=date, session_status=session_status,
+    )
+    return {
+        'sessions': sessions_list,
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+        'has_more': (offset + limit) < total,
+    }
+
+
+@app.get('/api/stats')
+async def stats():
+    """Return aggregate dashboard stats from DB."""
+    from app.database import get_stats_db
+    return get_stats_db()
+
+
+@app.get('/api/db/sessions/{session_id}')
+async def db_session_detail(session_id: str):
+    """Return full session data (including conversation + result JSON) from DB."""
+    from app.database import get_session_db
+    session = get_session_db(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail='Session not found in database')
+    return session
+
+
+@app.get('/api/db/sessions/{session_id}/analysis')
+async def db_session_analysis(session_id: str):
+    """
+    Return just the AI analysis and extractor rating for a session.
+    Useful for external integrations.
+    """
+    from app.database import get_session_db
+    session = get_session_db(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail='Session not found in database')
+    return {
+        'session_id':       session_id,
+        'analysis_status':  session.get('analysis_status'),
+        'analysis_summary': session.get('analysis_summary'),
+        'analysis_issues':  session.get('analysis_issues') or [],
+        'extractor_rating': session.get('extractor_rating'),
+        'rating_reason':    session.get('rating_reason'),
+        'analyzed_at':      session.get('analyzed_at'),
     }
 
 

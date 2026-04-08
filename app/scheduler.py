@@ -88,7 +88,18 @@ def start_scheduler():
     _scheduler.start()
     logger.info(f"Scheduler started — running every {interval} minute(s).")
 
-    # Run immediately on startup (in a separate thread so scheduler isn't blocked)
+    # Backfill existing JSON cache into Supabase (best-effort, non-blocking)
+    def _backfill():
+        try:
+            from app.cache import get_all_sessions
+            from app.database import backfill_from_cache
+            backfill_from_cache(get_all_sessions())
+        except Exception as e:
+            logger.warning(f"DB backfill skipped: {e}")
+
+    threading.Thread(target=_backfill, daemon=True).start()
+
+    # Run scrape immediately on startup
     t = threading.Thread(target=run_scrape_and_analyze, daemon=True)
     t.start()
 

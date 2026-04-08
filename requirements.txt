@@ -6,3 +6,4 @@ python-dotenv
 beautifulsoup4
 apscheduler
 jinja2
+supabase>=2.0.0

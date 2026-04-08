@@ -1,6 +1,9 @@
 import json
+import logging
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / 'data'
 CACHE_FILE = DATA_DIR / 'sessions.json'
@@ -37,6 +40,12 @@ def save_session(session_id: str, data: dict):
         cache = load_cache()
         cache[session_id] = data
         _save_cache(cache)
+    # Sync to Supabase outside the lock (non-blocking, best-effort)
+    try:
+        from app.database import upsert_session
+        upsert_session(data)
+    except Exception as e:
+        logger.warning(f"DB sync skipped for {session_id[:8]}: {e}")
 
 
 def get_session(session_id: str) -> dict | None:

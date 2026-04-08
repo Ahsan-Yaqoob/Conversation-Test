@@ -55,15 +55,15 @@ def parse_reference_html(html: str) -> dict:
 async def _navigate_to_sessions(context: BrowserContext) -> Page:
     """Create a fresh page, authenticate, and navigate to the Quotation Sessions list."""
     page = await context.new_page()
-    await page.goto(TARGET_URL, wait_until='domcontentloaded', timeout=30000)
-    await page.wait_for_selector('#apiKeyInput', timeout=15000)
+    await page.goto(TARGET_URL, wait_until='domcontentloaded', timeout=60000)
+    await page.wait_for_selector('#apiKeyInput', timeout=30000)
     await page.fill('#apiKeyInput', SITE_API_KEY)
     await page.keyboard.press('Enter')
-    await page.wait_for_selector('button.tab[data-tab="quotation-sessions"]', timeout=15000)
+    await page.wait_for_selector('button.tab[data-tab="quotation-sessions"]', timeout=30000)
     await page.click('button.tab[data-tab="quotation-sessions"]')
-    await page.wait_for_timeout(500)
+    await page.wait_for_timeout(800)
     await page.click('#qsRefresh')
-    await page.wait_for_selector('#qsTableBody tr', timeout=10000)
+    await page.wait_for_selector('#qsTableBody tr', timeout=20000)
     await page.wait_for_timeout(800)
     return page
 

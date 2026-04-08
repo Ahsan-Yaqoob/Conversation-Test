@@ -93,8 +93,9 @@ Carefully identify REAL errors only. Use the following rules strictly:
 - If a field is null but the user never mentioned it → do NOT flag it
 
 **EXCHANGE RATE RULE:**
-- If the lead passenger currency differs from supplier currency, exchange_rate of 0 is invalid → flag as wrong_value (high severity)
-- If currencies match, exchange_rate of 0 or 1 is acceptable
+- ONLY flag exchange_rate if the user EXPLICITLY stated a specific exchange rate value in the conversation (e.g. "exchange rate 200", "rate 1.5")
+- If the user did NOT mention exchange rate at all → do NOT flag it, regardless of what value the AI stored (0, 1, null). The system auto-defaults it.
+- If the user DID state a specific rate and the AI stored a different value → flag as wrong_value (low severity)
 
 **HOTEL COUNT RULE (critical):**
 - Count how many DISTINCT hotels the user mentioned (distinct = different hotel name OR different city OR different check-in/check-out dates)
@@ -104,26 +105,37 @@ Carefully identify REAL errors only. Use the following rules strictly:
   * Describe: "User mentioned X hotel(s) but JSON contains Y hotel entries"
 - Multiple room types for the SAME hotel do NOT require multiple hotel entries — they should be in ONE hotel object
 
+**PAX-SIZE DESCRIPTOR RULE (critical — read before checking room type or quantities):**
+The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
+  Single (1 pax), Double (2 pax), Twin (2 pax), Triple (3 pax), Quad (4 pax), 5-pax, 6-pax, etc.
 
-- Room quantities in the JSON (e.g. pax2, pax3, pax4, qty_2pax, qty_3pax) represent NUMBER OF ROOMS of that type — do NOT treat them as people counts
-- When user says "2 Double and 3 Triple", the numbers (2, 3) are the room quantities stored in pax/qty fields — this is correct
-- ROOM QUANTITIES CHECK: The numbers the user states for each room type must directly match in room_quantities:
-  * Rule: for each room type, look up its pax capacity from reference data, then check that qty_Xpax equals the number the user stated for that room type
-  * Example: user says "2 Double 3 Triple" → Double=2pax, Triple=3pax → qty_2pax must be 2, qty_3pax must be 3
-  * If the user mentions the same room type more than once, sum the quantities → "2 Double 1 Double" → qty_2pax must be 3
-  * If two different room types share the same pax capacity (e.g. Twin=2pax and Double=2pax), sum their quantities → "1 Twin 1 Double" → qty_2pax must be 2
-  * If qty value is WRONG (different from what user stated) → flag as wrong_value (high severity)
-  * If qty value is off because same-pax rooms were not summed → flag as wrong_value (high severity)
-  * If qty is off by 1 due to extra bed → flag as wrong_value (low severity)
+**Double and Twin are IDENTICAL in the system — both = 2 pax:**
+- When user says "1 Twin 1 Double" (or any mix of Twin+Double), the AI picks ONE of them to store in `room_type` and `room_type_id`. Either "Twin" or "Double" is correct — do NOT flag it.
+- Do NOT flag `room_type="Double"` when user also said "Twin", and vice versa.
+- Do NOT flag `room_type_id` for the same reason — whichever ID the AI picked for Twin or Double is acceptable.
+- Only flag `room_type` if it is set to something completely unrelated to what the user mentioned.
+
+**ROOM QUANTITIES for same-pax types (Twin + Double):**
+- When user mentions both Twin and Double (both 2pax), the AI stores only ONE of their counts in `qty_2pax` (not the sum).
+- Accept qty_2pax equal to the count of EITHER Twin OR Double as stated by user — both are valid.
+- Example: user says "1 Double 2 Twin" → qty_2pax=1 OR qty_2pax=2 are BOTH acceptable. Do NOT flag either.
+- Only flag qty_2pax if the value doesn't match any individual count the user stated (e.g. user said "1 Double 2 Twin" but qty_2pax=5 → flag).
+
+- Room quantities in the JSON (e.g. qty_2pax, qty_3pax) represent NUMBER OF ROOMS of that pax capacity — do NOT treat them as people counts
+- ROOM QUANTITIES CHECK (for non-same-pax types):
+  * Standard pax capacity mapping: Single=1pax, Double=2pax, Twin=2pax, Triple=3pax, Quad=4pax
+  * Example: user says "2 Double 3 Triple" → qty_2pax must be 2, qty_3pax must be 3
+  * If qty value is genuinely wrong → flag as wrong_value (high severity)
+  * If qty is off by 1 due to extra bed rounding → flag as wrong_value (low severity)
 - Do NOT validate or flag `room_count` — it is auto-calculated by the system
 - Do NOT validate or flag `weekday_price` or `weekend_price` fields on individual rooms — these are auto-calculated by the system, not set by the AI
-- ROOM TYPE rule: The AI captures only the BASE (lowest capacity) room type in the `room_type` field. If user requests multiple room types (e.g. "1 Delux and 1 Triple"), the AI correctly stores only the smaller room type (Triple). Do NOT flag a missing room type for the higher room types — this is correct system behavior
+- ROOM TYPE rule: The AI captures only the BASE (lowest capacity) room type in the `room_type` field. If user requests multiple room types (e.g. "1 Delux and 1 Triple"), the AI correctly stores only the smaller room type (Triple). Do NOT flag a missing room type for the higher room types — this is correct system behavior.
 - Extra bed COUNT rule (critical):
-  * extra_beds = (number of distinct room types mentioned by user) - 1
-  * Example: user says "1 Double, 2 Triple" → 2 room types → extra_beds = 1
-  * Example: user says "2 Double, 3 Triple, 1 Quad" → 3 room types → extra_beds = 2
-  * Example: user says "2 Double" only → 1 room type → extra_beds = 0
-  * Do NOT count the quantities (1, 2, 3...) — only count how many DISTINCT room types are mentioned
+  * extra_beds = (number of DISTINCT PAX CAPACITIES mentioned by user) - 1
+  * Twin and Double are BOTH 2pax = 1 distinct capacity. "1 Twin 1 Double" → 1 distinct capacity → extra_beds = 0
+  * Example: user says "1 Double, 2 Triple" → capacities: 2pax, 3pax → 2 distinct → extra_beds = 1
+  * Example: user says "1 Twin, 1 Double" → BOTH 2pax → 1 distinct capacity → extra_beds = 0
+  * Example: user says "2 Double, 3 Triple, 1 Quad" → 2pax, 3pax, 4pax → 3 distinct → extra_beds = 2
   * Flag as wrong_value (high) if the extra_beds value doesn't match this formula
 - Extra bed CHARGE rule:
   * If the user explicitly states an extra bed price → that exact price must be used → flag wrong_value if different
@@ -145,7 +157,9 @@ Return ONLY a valid JSON object — no markdown, no extra text:
       "severity": "high|medium|low"
     }}
   ],
-  "summary": "1-2 sentence summary of the analysis result"
+  "summary": "1-2 sentence summary of the analysis result",
+  "extractor_rating": 9,
+  "rating_reason": "Brief explanation of why this rating was given"
 }}
 
 Rules:
@@ -154,6 +168,18 @@ Rules:
 - Set overall_status to "ok" if no issues found
 - Empty issues array means no problems
 - Be precise — only flag genuine mistakes, not acceptable AI predictions
+
+Extractor Rating Guide (extractor_rating integer 1–10):
+- 10: No issues — perfect extraction
+- 9:  1–2 low-severity issues only
+- 8:  3–5 low-severity issues, OR 1 medium-severity issue
+- 7:  2–3 medium-severity issues, OR 1 high-severity issue
+- 6:  4–5 medium-severity issues, OR 2 high-severity issues
+- 5:  3–4 high-severity issues
+- 4:  5–6 high-severity issues
+- 3:  7–8 high-severity issues
+- 2:  9–10 high-severity issues
+- 1:  11+ high-severity issues or fundamental extraction failure (nothing extracted correctly)
 """
 
     try:
