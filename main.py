@@ -1,10 +1,11 @@
+import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
@@ -18,6 +19,12 @@ logging.basicConfig(
     format='%(asctime)s  %(levelname)-8s  %(name)s — %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+# ── Stats cache ───────────────────────────────────────────────────────────────
+_stats_cache: dict = {}
+_stats_cache_ts: float = 0.0
+_stats_lock = threading.Lock()
+_STATS_TTL = 30  # seconds
 
 
 @asynccontextmanager
@@ -76,7 +83,14 @@ async def get_sessions():
 async def analyze_one(session_id: str):
     """Run Gemini analysis for a single session. Returns cached result if already analyzed."""
     from app.cache import get_session, save_session
-    from app.analyzer import analyze_session
+    from app.analyzer import analyze_session, is_analyzing
+
+    # If auto-analysis is already running for this session, return 202
+    if is_analyzing(session_id):
+        return JSONResponse(
+            status_code=202,
+            content={'in_progress': True, 'message': 'Analysis is already running for this session.'},
+        )
 
     session = get_session(session_id)
     if not session:
@@ -103,6 +117,16 @@ async def analyze_one(session_id: str):
     return {'analysis': analysis, 'cached': False}
 
 
+@app.get('/api/sessions/{session_id}')
+async def get_session_by_id(session_id: str):
+    """Return a single session from cache (for polling analysis completion)."""
+    from app.cache import get_session
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail='Session not found')
+    return session
+
+
 @app.post('/api/refresh')
 async def refresh():
     """Trigger an immediate scrape + analyze cycle (non-blocking)."""
@@ -121,10 +145,12 @@ async def status():
     """Return whether the scrape job is currently running."""
     from app.scheduler import is_job_running, get_last_run
     from app.database import is_available
+    from app.analyzer import _analyzing_ids
     return {
         'running': is_job_running(),
         'last_run': get_last_run(),
         'db_connected': is_available(),
+        'analyzing': list(_analyzing_ids),
     }
 
 
@@ -144,7 +170,7 @@ async def db_setup_sql():
 
 @app.get('/api/db/sessions')
 async def db_sessions(
-    limit: int = 50,
+    limit: int = 25,
     offset: int = 0,
     search: str = '',
     status: str = '',          # analysis status filter: ok|warning|error|pending
@@ -172,19 +198,69 @@ async def db_sessions(
 
 @app.get('/api/stats')
 async def stats():
-    """Return aggregate dashboard stats from DB."""
+    """Return aggregate dashboard stats from DB, cached for 30s."""
+    import time
     from app.database import get_stats_db
-    return get_stats_db()
+    global _stats_cache, _stats_cache_ts
+
+    # Serve from cache if still fresh
+    with _stats_lock:
+        if _stats_cache and (time.monotonic() - _stats_cache_ts) < _STATS_TTL:
+            return _stats_cache
+
+    # Run the blocking DB call in a thread so we don't block the event loop
+    loop = asyncio.get_event_loop()
+    fresh = await loop.run_in_executor(None, get_stats_db)
+
+    # Only update cache if we got real data (non-empty response)
+    if fresh:
+        with _stats_lock:
+            _stats_cache = fresh
+            _stats_cache_ts = time.monotonic()
+        return fresh
+
+    # DB failed — return cached data (even if stale) so cards don't blank
+    with _stats_lock:
+        if _stats_cache:
+            return _stats_cache
+
+    return {}  # genuinely no data yet
 
 
 @app.get('/api/db/sessions/{session_id}')
 async def db_session_detail(session_id: str):
-    """Return full session data (including conversation + result JSON) from DB."""
+    """Return full session data (conversation + result JSON). Merges DB + cache."""
     from app.database import get_session_db
-    session = get_session_db(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail='Session not found in database')
-    return session
+    from app.cache import get_session as get_cache_session
+
+    db_row = get_session_db(session_id)
+    cached = get_cache_session(session_id)
+
+    if not db_row and not cached:
+        raise HTTPException(status_code=404, detail='Session not found')
+
+    # Start with DB row (has flat analysis columns), fill missing data from cache
+    result = dict(db_row) if db_row else {}
+    if cached:
+        # Cache has conversation / result_json / reference_data that DB may lack
+        for field in ('conversation', 'result_json', 'reference_data'):
+            if not result.get(field):
+                result[field] = cached.get(field)
+        # Also pull analysis if DB hasn't written it yet
+        if not result.get('analysis_status') and cached.get('analysis'):
+            a = cached['analysis']
+            result['analysis_status']  = a.get('overall_status')
+            result['analysis_summary'] = a.get('summary')
+            result['analysis_issues']  = a.get('issues')
+            result['extractor_rating'] = a.get('extractor_rating')
+            result['rating_reason']    = a.get('rating_reason')
+            result['analyzed_at']      = a.get('analyzed_at')
+
+    # Always include dismissed_issues (defaults to empty list)
+    if 'dismissed_issues' not in result:
+        result['dismissed_issues'] = []
+
+    return result
 
 
 @app.get('/api/db/sessions/{session_id}/analysis')
@@ -205,6 +281,66 @@ async def db_session_analysis(session_id: str):
         'extractor_rating': session.get('extractor_rating'),
         'rating_reason':    session.get('rating_reason'),
         'analyzed_at':      session.get('analyzed_at'),
+    }
+
+
+
+@app.patch('/api/db/sessions/{session_id}/issues/dismiss-all')
+async def dismiss_all_endpoint(session_id: str, restore: bool = False):
+    """
+    Dismiss all active issues at once, or restore all dismissed ones.
+    Pass ?restore=true to undo all dismissals.
+    """
+    from app.database import dismiss_all_issues
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: dismiss_all_issues(session_id, restore)
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail='Session not found or DB error')
+
+    global _stats_cache_ts
+    with _stats_lock:
+        _stats_cache_ts = 0.0
+
+    return {
+        'session_id':       session_id,
+        'restored':         restore,
+        'analysis_status':  result['analysis_status'],
+        'orig_rating':      result['orig_rating'],
+        'effective_rating': result['effective_rating'],
+        'dismissed_issues': result['dismissed_issues'],
+    }
+
+
+@app.patch('/api/db/sessions/{session_id}/issues/{issue_index}')
+async def dismiss_issue_endpoint(session_id: str, issue_index: int, restore: bool = False):
+    """
+    Dismiss or restore a single analysis issue by its index.
+    Recomputes effective analysis_status and extractor_rating.
+    Pass ?restore=true to undo a dismissal.
+    """
+    from app.database import dismiss_issue
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: dismiss_issue(session_id, issue_index, restore)
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail='Session not found or DB error')
+
+    # Invalidate stats cache so next load reflects updated status
+    global _stats_cache_ts
+    with _stats_lock:
+        _stats_cache_ts = 0.0
+
+    return {
+        'session_id':       session_id,
+        'issue_index':      issue_index,
+        'restored':         restore,
+        'analysis_status':  result['analysis_status'],
+        'orig_rating':      result['orig_rating'],
+        'effective_rating': result['effective_rating'],
+        'dismissed_issues': result['dismissed_issues'],
     }
 
 

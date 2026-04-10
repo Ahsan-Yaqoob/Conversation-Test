@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import threading
+from datetime import datetime, timezone
 from google import genai 
 from dotenv import load_dotenv
 
@@ -12,6 +14,60 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 GEMINI_MODEL   = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash') 
 
 _client = genai.Client(api_key=GEMINI_API_KEY)
+
+# ── Concurrency guard — shared by scheduler auto-analysis + manual API endpoint ──
+_analyzing_ids: set[str] = set()
+_analyzing_lock = threading.Lock()
+
+
+def is_analyzing(session_id: str) -> bool:
+    with _analyzing_lock:
+        return session_id in _analyzing_ids
+
+
+def run_analysis_safe(session_id: str, session_data: dict) -> dict | None:
+    """
+    Thread-safe wrapper around analyze_session.
+    Returns None immediately if the session is already being analyzed.
+    Saves result to cache + DB when done.
+    """
+    with _analyzing_lock:
+        if session_id in _analyzing_ids:
+            logger.info(f"Analysis already in progress for {session_id[:8]}, skipping.")
+            return None
+        _analyzing_ids.add(session_id)
+
+    try:
+        from app.cache import get_session, save_session
+
+        # Re-fetch latest data in case it was updated since we queued
+        session = get_session(session_id) or session_data
+
+        # Skip if already successfully analyzed (could have been done by another thread)
+        existing = session.get('analysis', {})
+        if existing and existing.get('overall_status') in ('ok', 'warning'):
+            logger.info(f"Session {session_id[:8]} already analyzed, skipping.")
+            return existing
+
+        if not session.get('conversation') and not session.get('result_json'):
+            logger.info(f"Session {session_id[:8]} has no data to analyze.")
+            return None
+
+        analysis = analyze_session(session)
+        analysis['analyzed_at'] = datetime.now(timezone.utc).isoformat()
+        session['analysis'] = analysis
+        save_session(session_id, session)
+        logger.info(
+            f"Auto-analyzed {session_id[:8]} → {analysis.get('overall_status')} "
+            f"({len(analysis.get('issues', []))} issues, rating={analysis.get('extractor_rating')})"
+        )
+        return analysis
+    except Exception as e:
+        logger.error(f"Analysis error for {session_id[:8]}: {e}", exc_info=True)
+        return None
+    finally:
+        with _analyzing_lock:
+            _analyzing_ids.discard(session_id)
 
 
 def _format_conversation(messages: list) -> str:
@@ -96,6 +152,22 @@ Carefully identify REAL errors only. Use the following rules strictly:
 - ONLY flag exchange_rate if the user EXPLICITLY stated a specific exchange rate value in the conversation (e.g. "exchange rate 200", "rate 1.5")
 - If the user did NOT mention exchange rate at all → do NOT flag it, regardless of what value the AI stored (0, 1, null). The system auto-defaults it.
 - If the user DID state a specific rate and the AI stored a different value → flag as wrong_value (low severity)
+
+**TRANSFER VEHICLE RULE (critical):**
+Each transfer object has a `supplier_mode` field: `"existing"` or `"new"`.
+
+- `supplier_mode = "existing"`: The vehicle is pre-registered in the system. Its specs (`luggage`, `transmission`, `pax_capacity`, `passengers_capacity`) are stored in the system database and are NOT captured in the JSON.
+  * **NEVER flag** `luggage`, `transmission`, `pax_capacity`, `passengers_capacity`, `luggage_capacity` as missing for existing-mode transfers — this is correct behaviour.
+
+- `supplier_mode = "new"`: The user is defining a brand-new vehicle. Specs belong inside `new_vehicle_category` object:
+  * `passengers_capacity` → user's stated pax count
+  * `luggage_capacity` → user's stated luggage count
+  * `value` → vehicle category name (e.g. "Bus")
+  * **Only flag a spec as missing_field** when ALL THREE conditions are true:
+    1. `supplier_mode = "new"`
+    2. The user explicitly stated that value in conversation (e.g. "pax 40", "luggage 2", "transmission Manual")
+    3. The field is absent or null inside `new_vehicle_category`
+  * If the user did NOT mention the value, do NOT flag it regardless of what is in the JSON.
 
 **HOTEL COUNT RULE (critical):**
 - Count how many DISTINCT hotels the user mentioned (distinct = different hotel name OR different city OR different check-in/check-out dates)

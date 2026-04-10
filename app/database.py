@@ -47,6 +47,7 @@ def _row_from_session(data: dict) -> dict:
         'services':         data.get('services'),
         'msg_count':        data.get('msg_count'),
         'scraped_at':       data.get('scraped_at'),
+        'session_created_at': data.get('created_at'),
         'conversation':     data.get('conversation'),
         'result_json':      data.get('result_json'),
         'reference_data':   data.get('reference_data'),
@@ -108,7 +109,7 @@ def get_session_db(session_id: str) -> dict | None:
 
 
 def get_all_sessions_db(
-    limit: int = 50,
+    limit: int = 25,
     offset: int = 0,
     search: str = '',
     status_filter: str = '',       # 'ok' | 'warning' | 'error' | 'pending' | ''
@@ -121,9 +122,9 @@ def get_all_sessions_db(
         return [], 0
     try:
         cols = (
-            'session_id,status,services,msg_count,scraped_at,'
+            'session_id,status,services,msg_count,scraped_at,session_created_at,'
             'analysis_status,analysis_summary,analysis_issues,'
-            'extractor_rating,rating_reason,analyzed_at,db_updated_at'
+            'extractor_rating,rating_reason,analyzed_at,db_updated_at,dismissed_issues'
         )
         q = client.table('sessions').select(cols, count='exact')
 
@@ -137,13 +138,13 @@ def get_all_sessions_db(
             q = q.ilike('status', session_status)
         if date_filter == 'today':
             today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-            q = q.gte('scraped_at', today)
+            q = q.gte('session_created_at', today)
         elif date_filter == 'week':
             from datetime import timedelta
             week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            q = q.gte('scraped_at', week_ago)
+            q = q.gte('session_created_at', week_ago)
 
-        result = q.order('scraped_at', desc=True).range(offset, offset + limit - 1).execute()
+        result = q.order('session_created_at', desc=True, nullsfirst=False).range(offset, offset + limit - 1).execute()
         return result.data or [], result.count or 0
     except Exception as e:
         logger.error(f"DB list error: {e}")
@@ -164,27 +165,163 @@ def get_stats_db() -> dict:
             q = client.table('sessions').select('session_id', count='exact')
             for k, v in filters.items():
                 if k == 'gte_scraped_at':
-                    q = q.gte('scraped_at', v)
+                    q = q.gte('session_created_at', v)
                 elif k == 'eq_analysis_status':
                     q = q.eq('analysis_status', v)
                 elif k == 'null_analysis_status':
                     q = q.is_('analysis_status', 'null')
                 elif k == 'ilike_status':
                     q = q.ilike('status', v)
+                elif k == 'eq_status':
+                    q = q.eq('status', v)
             return q.execute().count or 0
 
+        completed        = _count(ilike_status='completed')
+        ok_completed     = _count(ilike_status='completed', eq_analysis_status='ok')
+        ok_pct           = round(ok_completed / completed * 100) if completed else 0
+        completed_today  = _count(eq_status='completed', gte_scraped_at=today)
+        completed_week   = _count(eq_status='completed', gte_scraped_at=week_ago)
+
         return {
-            'total':     _count(),
-            'today':     _count(gte_scraped_at=today),
-            'ok':        _count(eq_analysis_status='ok'),
-            'warning':   _count(eq_analysis_status='warning'),
-            'error':     _count(eq_analysis_status='error'),
-            'pending':   _count(null_analysis_status=True),
-            'completed': _count(ilike_status='completed'),
+            'total':           _count(),
+            'today':           _count(gte_scraped_at=today),
+            'ok':              _count(eq_analysis_status='ok'),
+            'warning':         _count(eq_analysis_status='warning'),
+            'error':           _count(eq_analysis_status='error'),
+            'pending':         _count(null_analysis_status=True),
+            'completed':       completed,
+            'ok_pct':          ok_pct,
+            'ok_completed':    ok_completed,
+            'completed_today': completed_today,
+            'completed_week':  completed_week,
         }
     except Exception as e:
         logger.error(f"DB stats error: {e}")
         return {}
+
+
+def _recompute_effective(issues: list, dismissed: list[int]) -> tuple[str | None, int | None]:
+    """
+    Given the full issues list and dismissed indices, return
+    (effective_status, effective_rating_adjustment).
+    effective_status: 'ok' | 'warning' | 'error'
+    effective_rating: integer adjustment added to original rating (capped 1-10)
+    """
+    remaining = [iss for i, iss in enumerate(issues) if i not in dismissed]
+    dismissed_issues = [iss for i, iss in enumerate(issues) if i in dismissed]
+
+    if any(i.get('severity') == 'high' for i in remaining):
+        eff_status = 'error'
+    elif any(i.get('severity') in ('medium', 'warning') for i in remaining):
+        eff_status = 'warning'
+    elif remaining:
+        eff_status = 'warning'
+    else:
+        eff_status = 'ok'
+
+    # Points recovered per dismissed issue
+    bonus = sum(
+        2 if i.get('severity') == 'high' else 1
+        for i in dismissed_issues
+    )
+    return eff_status, bonus
+
+
+def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> dict | None:
+    """
+    Dismiss (or restore) a single issue by its index in analysis_issues.
+    Only updates dismissed_issues + analysis_status in DB.
+    extractor_rating is NEVER overwritten — effective rating is computed in frontend.
+    Returns updated fields dict on success, None on failure.
+    """
+    client = get_client()
+    if not client:
+        return None
+    try:
+        row = (
+            client.table('sessions')
+            .select('analysis_issues,extractor_rating,dismissed_issues')
+            .eq('session_id', session_id)
+            .maybe_single()
+            .execute()
+        ).data
+        if not row:
+            return None
+
+        issues      = row.get('analysis_issues') or []
+        orig_rating = row.get('extractor_rating') or 0
+        dismissed   = list(row.get('dismissed_issues') or [])
+
+        if restore:
+            dismissed = [i for i in dismissed if i != issue_index]
+        else:
+            if issue_index not in dismissed:
+                dismissed.append(issue_index)
+
+        eff_status, bonus = _recompute_effective(issues, dismissed)
+        # Compute effective rating for the response, but DO NOT save it —
+        # orig rating stays untouched so restore always works correctly
+        eff_rating = min(10, max(1, orig_rating + bonus)) if orig_rating else None
+
+        update = {
+            'dismissed_issues': dismissed,
+            'analysis_status':  eff_status,
+            'db_updated_at':    datetime.now(timezone.utc).isoformat(),
+        }
+        client.table('sessions').update(update).eq('session_id', session_id).execute()
+        logger.info(f"dismiss_issue {session_id[:8]}… idx={issue_index} restore={restore} → {eff_status} eff_rating={eff_rating}")
+        return {
+            **update,
+            'orig_rating':      orig_rating,
+            'effective_rating': eff_rating,
+        }
+    except Exception as e:
+        logger.error(f"dismiss_issue error [{session_id[:8]}]: {e}")
+        return None
+
+
+def dismiss_all_issues(session_id: str, restore: bool = False) -> dict | None:
+    """
+    Dismiss all active issues at once (or restore all dismissed ones).
+    Only updates dismissed_issues + analysis_status.  extractor_rating is never touched.
+    """
+    client = get_client()
+    if not client:
+        return None
+    try:
+        row = (
+            client.table('sessions')
+            .select('analysis_issues,extractor_rating,dismissed_issues')
+            .eq('session_id', session_id)
+            .maybe_single()
+            .execute()
+        ).data
+        if not row:
+            return None
+
+        issues      = row.get('analysis_issues') or []
+        orig_rating = row.get('extractor_rating') or 0
+
+        dismissed = [] if restore else list(range(len(issues)))
+
+        eff_status, bonus = _recompute_effective(issues, dismissed)
+        eff_rating = min(10, max(1, orig_rating + bonus)) if orig_rating else None
+
+        update = {
+            'dismissed_issues': dismissed,
+            'analysis_status':  eff_status,
+            'db_updated_at':    datetime.now(timezone.utc).isoformat(),
+        }
+        client.table('sessions').update(update).eq('session_id', session_id).execute()
+        logger.info(f"dismiss_all {session_id[:8]}… restore={restore} → {eff_status} eff_rating={eff_rating}")
+        return {
+            **update,
+            'orig_rating':      orig_rating,
+            'effective_rating': eff_rating,
+        }
+    except Exception as e:
+        logger.error(f"dismiss_all error [{session_id[:8]}]: {e}")
+        return None
 
 
 def check_table() -> bool:

@@ -21,7 +21,7 @@
         <span id="darkIcon">🌙</span> <span id="darkLabel">Dark</span>
       </button>
       <button id="refreshBtn" class="btn-refresh" onclick="triggerRefresh()">
-        <span id="refreshIcon">🔄</span> Refresh
+        <span id="refreshIcon">⚡</span> Fetch
       </button>
     </div>
   </div>
@@ -39,7 +39,7 @@
       <span class="stat-num" id="sn-total">—</span>
       <span class="stat-lbl">Total</span>
     </div>
-    <div class="stat-card" id="stat-today"     onclick="setFilter('date','today')" title="Scraped today">
+    <div class="stat-card" id="stat-today"     onclick="setFilter('date','today')" title="Created today">
       <span class="stat-num" id="sn-today">—</span>
       <span class="stat-lbl">Today</span>
     </div>
@@ -58,6 +58,19 @@
     <div class="stat-card pend" id="stat-pend" onclick="setFilter('status','pending')" title="Not analyzed">
       <span class="stat-num" id="sn-pend">—</span>
       <span class="stat-lbl">⏳ Pending</span>
+    </div>
+    <div class="stat-card okpct" id="stat-okpct" onclick="setFilter('session','completed')" title="% of completed sessions rated OK by AI">
+      <span class="stat-num" id="sn-okpct">—</span>
+      <div class="okpct-track"><div class="okpct-fill" id="okpct-bar" style="width:0%"></div></div>
+      <span class="stat-lbl" id="sn-okpct-sub" style="font-size:10px;margin-top:2px;">— of — completed</span>
+    </div>
+    <div class="stat-card comp-today" id="stat-comp-today" onclick="setFilter('session','completed_today')" title="Completed sessions created today">
+      <span class="stat-num" id="sn-comp-today">—</span>
+      <span class="stat-lbl">✅ Done Today</span>
+    </div>
+    <div class="stat-card comp-week" id="stat-comp-week" onclick="setFilter('session','completed_week')" title="Completed sessions in last 7 days">
+      <span class="stat-num" id="sn-comp-week">—</span>
+      <span class="stat-lbl">✅ Done 7d</span>
     </div>
   </div>
 
@@ -94,14 +107,14 @@
       <span>AI Result</span>
       <span>Issues</span>
       <span>Summary</span>
-      <span>Scraped At</span>
+      <span>Created At</span>
       <span>Action</span>
     </div>
 
     <div id="sessionRows"></div>
 
     <div id="emptyState" class="empty-state" style="display:none;">
-      <p>No sessions found. Try adjusting your filters or click <strong>Refresh</strong>.</p>
+      <p>No sessions found. Try adjusting your filters or click <strong>Fetch</strong>.</p>
     </div>
 
     <!-- Load more / pagination -->
@@ -120,7 +133,13 @@
   <div class="dp-header">
     <div>
       <div class="dp-label">Session</div>
-      <div id="dpSessionId" class="dp-session-id"></div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <div id="dpSessionId" class="dp-session-id"></div>
+        <button class="copy-sid-btn" title="Copy session ID" onclick="
+          const sid=document.getElementById('dpSessionId').textContent;
+          navigator.clipboard.writeText(sid).then(()=>{this.textContent='✅';setTimeout(()=>this.textContent='⧉',1400)});
+        ">⧉</button>
+      </div>
     </div>
     <button class="dp-close" onclick="closeDetail()">✕</button>
   </div>
@@ -129,12 +148,14 @@
     <button class="dtab active" data-tab="analysis" onclick="switchTab(this,'analysis')">🔍 Analysis</button>
     <button class="dtab" data-tab="conversation" onclick="switchTab(this,'conversation')">💬 Conversation</button>
     <button class="dtab" data-tab="resultjson" onclick="switchTab(this,'resultjson')">📋 Result JSON</button>
+    <button class="dtab" data-tab="refdata" onclick="switchTab(this,'refdata')">📊 Reference Data</button>
   </div>
 
   <div class="dp-body">
     <div id="tabAnalysis"    class="tab-pane active"></div>
     <div id="tabConversation" class="tab-pane" style="display:none;"></div>
     <div id="tabResultJson"  class="tab-pane" style="display:none;"></div>
+    <div id="tabRefData"     class="tab-pane" style="display:none;"></div>
   </div>
 </aside>
 
@@ -161,6 +182,7 @@
   let sessions     = [];
   let polling      = null;
   let analyzingId  = null;
+  let autoAnalyzingIds = new Set(); // sessions being analyzed server-side (auto)
   let currentOffset = 0;
   let currentTotal  = 0;
   let hasMore       = false;
@@ -168,8 +190,9 @@
 
   // Active filters
   let fSearch = '';
-  let fStatus = '';   // ok | warning | error | pending | ''
-  let fDate   = '';   // today | week | ''
+  let fStatus = '';        // ok | warning | error | pending | ''
+  let fDate   = '';        // today | week | ''
+  let fSessionStatus = ''; // completed | active | completed_today | completed_week | ''
 
   const SVC_ICONS = { hotel:'🏨', flight:'✈️', visa:'📄', transfer:'🚗' };
   const AI_CFG = {
@@ -180,23 +203,46 @@
   };
 
   // ── Stats ──────────────────────────────────────────────────────────────────
+  let _statsInFlight = false;
   async function loadStats() {
+    if (_statsInFlight) return;  // skip if already fetching
+    _statsInFlight = true;
     try {
       const d = await fetch('/api/stats').then(r => r.json());
-      document.getElementById('sn-total').textContent = d.total  ?? '—';
-      document.getElementById('sn-today').textContent = d.today  ?? '—';
-      document.getElementById('sn-ok').textContent    = d.ok     ?? '—';
-      document.getElementById('sn-warn').textContent  = d.warning ?? '—';
-      document.getElementById('sn-err').textContent   = d.error  ?? '—';
-      document.getElementById('sn-pend').textContent  = d.pending ?? '—';
-    } catch(e) { console.error('Stats error', e); }
+      // Only update each card if the value is actually present — never blank existing values
+      if (d.total     != null) document.getElementById('sn-total').textContent = d.total;
+      if (d.today     != null) document.getElementById('sn-today').textContent = d.today;
+      if (d.ok        != null) document.getElementById('sn-ok').textContent    = d.ok;
+      if (d.warning   != null) document.getElementById('sn-warn').textContent  = d.warning;
+      if (d.error     != null) document.getElementById('sn-err').textContent   = d.error;
+      if (d.pending   != null) document.getElementById('sn-pend').textContent  = d.pending;
+      // OK rate card
+      if (d.ok_pct != null) {
+        const pct = d.ok_pct;
+        document.getElementById('sn-okpct').textContent = pct + '%';
+        const bar = document.getElementById('okpct-bar');
+        bar.style.width = pct + '%';
+        bar.style.background = pct >= 80 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#ef4444';
+      }
+      if (d.ok_completed != null || d.completed != null) {
+        document.getElementById('sn-okpct-sub').textContent =
+          `${d.ok_completed ?? 0} of ${d.completed ?? 0} completed`;
+      }
+      if (d.completed_today != null) document.getElementById('sn-comp-today').textContent = d.completed_today;
+      if (d.completed_week  != null) document.getElementById('sn-comp-week').textContent  = d.completed_week;
+    } catch(e) {
+      console.warn('Stats fetch failed (keeping previous values):', e);
+    } finally {
+      _statsInFlight = false;
+    }
   }
 
   // ── Filter helpers ─────────────────────────────────────────────────────────
   function setFilter(type, value) {
-    if (type === 'status') { fStatus = fStatus === value ? '' : value; fDate = ''; }
-    if (type === 'date')   { fDate   = fDate   === value ? '' : value; fStatus = ''; }
-    if (type === '')       { fStatus = ''; fDate = ''; }
+    if (type === 'status')  { fStatus = fStatus === value ? '' : value; fDate = ''; fSessionStatus = ''; }
+    if (type === 'date')    { fDate = fDate === value ? '' : value; fStatus = ''; fSessionStatus = ''; }
+    if (type === 'session') { fSessionStatus = fSessionStatus === value ? '' : value; fDate = ''; fStatus = ''; }
+    if (type === '')        { fStatus = ''; fDate = ''; fSessionStatus = ''; }
     syncChips();
     resetAndLoad();
   }
@@ -223,16 +269,18 @@
   }
 
   function syncChips() {
-    // Highlight stat cards
     document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active-filter'));
-    if (fStatus === 'ok')      document.getElementById('stat-ok').classList.add('active-filter');
-    if (fStatus === 'warning') document.getElementById('stat-warn').classList.add('active-filter');
-    if (fStatus === 'error')   document.getElementById('stat-err').classList.add('active-filter');
-    if (fStatus === 'pending') document.getElementById('stat-pend').classList.add('active-filter');
-    if (fDate   === 'today')   document.getElementById('stat-today').classList.add('active-filter');
+    if (fStatus === 'ok')              document.getElementById('stat-ok').classList.add('active-filter');
+    if (fStatus === 'warning')         document.getElementById('stat-warn').classList.add('active-filter');
+    if (fStatus === 'error')           document.getElementById('stat-err').classList.add('active-filter');
+    if (fStatus === 'pending')         document.getElementById('stat-pend').classList.add('active-filter');
+    if (fDate   === 'today' && !fSessionStatus) document.getElementById('stat-today').classList.add('active-filter');
+    if (fSessionStatus === 'completed_today')   document.getElementById('stat-comp-today').classList.add('active-filter');
+    if (fSessionStatus === 'completed_week')    document.getElementById('stat-comp-week').classList.add('active-filter');
+    if (fSessionStatus === 'completed' && !fDate) document.getElementById('stat-okpct') && document.getElementById('stat-okpct').classList.add('active-filter');
     // Sync date chips
     document.querySelectorAll('.filter-chips .chip').forEach(c => {
-      c.classList.toggle('active', c.dataset.filter === fDate && !fStatus);
+      c.classList.toggle('active', c.dataset.filter === fDate && !fStatus && !fSessionStatus);
     });
   }
 
@@ -247,12 +295,18 @@
     // Non-append always starts from page 1 so auto-refresh shows freshest data
     if (!append) currentOffset = 0;
     try {
+      // compound filters: completed_today / completed_week split into parts
+      let sendSessionStatus = fSessionStatus;
+      let sendDate = fDate;
+      if (fSessionStatus === 'completed_today') { sendSessionStatus = 'completed'; sendDate = 'today'; }
+      if (fSessionStatus === 'completed_week')  { sendSessionStatus = 'completed'; sendDate = 'week'; }
       const params = new URLSearchParams({
-        limit:  PAGE_SIZE,
-        offset: currentOffset,
-        search: fSearch,
-        status: fStatus,
-        date:   fDate,
+        limit:          PAGE_SIZE,
+        offset:         currentOffset,
+        search:         fSearch,
+        status:         fStatus,
+        date:           sendDate,
+        session_status: sendSessionStatus,
       });
       const d = await fetch(`/api/db/sessions?${params}`).then(r => r.json());
 
@@ -286,12 +340,24 @@
   function normRow(s) {
     // DB rows use flat columns; UI expects nested analysis object
     if (s.analysis) return s;  // already nested (from cache fallback)
+    // Compute effective_rating from dismissed_issues + extractor_rating
+    const dismissed = s.dismissed_issues || [];
+    const issues    = s.analysis_issues  || [];
+    let effective_rating = s.extractor_rating;
+    if (dismissed.length && s.extractor_rating) {
+      const bonus = dismissed.reduce((sum, i) => {
+        const sev = (issues[i] || {}).severity;
+        return sum + (sev === 'high' ? 2 : 1);
+      }, 0);
+      effective_rating = Math.min(10, Math.max(1, s.extractor_rating + bonus));
+    }
     return {
       ...s,
+      effective_rating,
       analysis: s.analysis_status ? {
         overall_status:  s.analysis_status,
         summary:         s.analysis_summary,
-        issues:          s.analysis_issues || [],
+        issues,
         extractor_rating: s.extractor_rating,
         rating_reason:   s.rating_reason,
         analyzed_at:     s.analyzed_at,
@@ -309,15 +375,20 @@
 
   function updateLoadMore() {
     const wrap = document.getElementById('loadMoreWrap');
+    const btn  = document.getElementById('loadMoreBtn');
     const info = document.getElementById('loadMoreInfo');
+    if (!sessions.length) {
+      wrap.style.display = 'none';
+      return;
+    }
+    wrap.style.display = 'flex';
     if (hasMore) {
-      wrap.style.display = 'flex';
+      btn.style.display = '';
+      btn.disabled = false;
       info.textContent = `Showing ${sessions.length} of ${currentTotal}`;
     } else {
-      wrap.style.display = sessions.length > 0 ? 'flex' : 'none';
-      wrap.querySelector('button').style.display = 'none';
-      if (sessions.length > 0)
-        info.textContent = `All ${currentTotal} session${currentTotal !== 1 ? 's' : ''} shown`;
+      btn.style.display = 'none';
+      info.textContent = `All ${currentTotal} session${currentTotal !== 1 ? 's' : ''} shown`;
     }
   }
 
@@ -335,11 +406,13 @@
       const aiKey  = hasRealAI ? analysis.overall_status : (isAnalysisError || s.scrape_error ? 'error' : 'pending');
       const cfg    = AI_CFG[aiKey] || AI_CFG.pending;
       const issues = analysis.issues || [];
-      const summary = analysis.summary || (s.scrape_error ? '⚠ Scrape error: ' + s.scrape_error : '—');
+      const dismissed  = s.dismissed_issues || [];
+      const activeCount = issues.filter((_, i) => !dismissed.includes(i)).length;
+      const summary = analysis.summary || (s.scrape_error ? '⚠ Fetch error: ' + s.scrape_error : '—');
       const services = (s.services || []).map(sv => `<span title="${sv}">${SVC_ICONS[sv]||sv}</span>`).join('');
       const statusCls = (s.status||'').toLowerCase() === 'completed' ? 'completed' : 'active';
-      const time = s.scraped_at ? new Date(s.scraped_at).toLocaleString() : '—';
-      const rating = analysis.extractor_rating;
+      const time = (s.session_created_at || s.scraped_at) ? new Date(s.session_created_at || s.scraped_at).toLocaleString() : '—';
+      const rating = (s.effective_rating != null) ? s.effective_rating : analysis.extractor_rating;
       const ratingHtml = (rating != null && hasRealAI)
         ? `<span class="rating-pill ${rating>=8?'r-good':rating>=5?'r-mid':'r-low'}">${rating}/10</span>` : '';
       const shortId = s.session_id.slice(0,8) + '…';
@@ -351,8 +424,8 @@
         actionBtn = `<span class="no-action" title="No conversation data">—</span>`;
       } else if (hasRealAI) {
         actionBtn = `<button class="btn-view" onclick="event.stopPropagation();openDetail('${s.session_id}')">👁 View</button>`;
-      } else if (analyzingId === s.session_id) {
-        actionBtn = `<button class="btn-analyze" disabled>⏳</button>`;
+      } else if (analyzingId === s.session_id || autoAnalyzingIds.has(s.session_id)) {
+        actionBtn = `<button class="btn-analyze" disabled title="AI analysis running…">⏳</button>`;
       } else {
         const isLocked = analyzingId !== null;
         const label = isAnalysisError ? '🔄 Retry' : '🔍 Analyze';
@@ -360,7 +433,7 @@
       }
 
       return `
-      <div class="tbl-row" onclick="openDetail('${s.session_id}')">
+      <div class="tbl-row" data-sid="${s.session_id}" onclick="openDetail('${s.session_id}')">
         <span class="sid-wrap">
           <span class="sid" title="${s.session_id}">${shortId}</span>
           <button class="copy-btn" title="Copy session ID" onclick="event.stopPropagation();copyId('${s.session_id}',this)">⧉</button>
@@ -368,7 +441,7 @@
         <span><span class="badge ${statusCls}">${s.status||'—'}</span></span>
         <span class="svc-cell">${services||'—'}</span>
         <span><span class="ai-badge ${cfg.cls}">${cfg.icon} ${cfg.label}</span>${ratingHtml}</span>
-        <span class="issue-cnt ${issues.length?'has-issues':''}">${issues.length}</span>
+        <span class="issue-cnt ${activeCount?'has-issues':''}">${activeCount}</span>
         <span class="summary-cell" title="${esc(summary)}">${esc(summary).slice(0,65)}${summary.length>65?'…':''}</span>
         <span class="time-cell">${time}</span>
         <span onclick="event.stopPropagation()">${actionBtn}</span>
@@ -396,7 +469,18 @@
       if (s) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(s);
     }
     try {
-      const d = await fetch(`/api/analyze/${sessionId}`, { method: 'POST' }).then(r => r.json());
+      const res = await fetch(`/api/analyze/${sessionId}`, { method: 'POST' });
+      const d = await res.json();
+
+      // 202: auto-analysis already running on the server — poll for completion
+      if (res.status === 202 || d.in_progress) {
+        analyzingId = null;
+        autoAnalyzingIds.add(sessionId);
+        renderTable(sessions);
+        _pollUntilAnalyzed(sessionId, fromPanel);
+        return;
+      }
+
       const s = sessions.find(x => x.session_id === sessionId);
       if (s && d.analysis) s.analysis = d.analysis;
       analyzingId = null;
@@ -410,6 +494,37 @@
       }
     } catch(e) { analyzingId = null; renderTable(sessions); }
   }
+
+  async function _pollUntilAnalyzed(sessionId, fromPanel) {
+    const maxAttempts = 30; // 30 × 3s = 90s max wait
+    let attempt = 0;
+    const check = async () => {
+      attempt++;
+      try {
+        const r = await fetch(`/api/sessions/${sessionId}`).then(res => res.json());
+        if (r && r.analysis && r.analysis.overall_status) {
+          const s = sessions.find(x => x.session_id === sessionId);
+          if (s) { s.analysis = r.analysis; }
+          autoAnalyzingIds.delete(sessionId);
+          renderTable(sessions);
+          loadStats();
+          const panelId = document.getElementById('dpSessionId').textContent;
+          if (panelId === sessionId && document.getElementById('detailPanel').classList.contains('open')) {
+            openDetail(sessionId);
+          }
+          return;
+        }
+      } catch(e) {}
+      if (attempt < maxAttempts) {
+        setTimeout(check, 3000);
+      } else {
+        autoAnalyzingIds.delete(sessionId);
+        renderTable(sessions);
+      }
+    };
+    setTimeout(check, 3000);
+  }
+
   async function runAnalyze(id) { await _doAnalyze(id, { fromPanel: false }); }
   async function runAnalyzeFromPanel(id) { await _doAnalyze(id, { fromPanel: true }); }
 
@@ -419,9 +534,9 @@
     const badge = document.getElementById('statusBadge');
     if (btn.disabled) return;
     btn.disabled = true;
-    btn.innerHTML = '<span class="spin">🔄</span> Scraping…';
+    btn.innerHTML = '<span class="spin">⚡</span> Fetching…';
     badge.className = 'job-badge running';
-    badge.textContent = '● Scraping';
+    badge.textContent = '⚡ Fetching';
     document.getElementById('progressBar').style.display = 'block';
     try {
       await fetch('/api/refresh', { method: 'POST' });
@@ -434,21 +549,41 @@
     polling = setInterval(async () => {
       await loadSessions(false);
       const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
+      syncAnalyzingIds(d.analyzing || []);
       if (!d.running) stopRefreshing();
     }, 3000);
     setTimeout(stopRefreshing, 180000);
+  }
+
+  let _countdownTimer = null;
+  let _nextFetchAt = Date.now() + 5000;
+
+  function resetCountdown() { _nextFetchAt = Date.now() + 5000; }
+
+  function startCountdown() {
+    if (_countdownTimer) clearInterval(_countdownTimer);
+    resetCountdown();
+    _countdownTimer = setInterval(() => {
+      if (polling) return; // hide during active fetch
+      const secs = Math.max(0, Math.round((_nextFetchAt - Date.now()) / 1000));
+      const badge = document.getElementById('statusBadge');
+      if (badge && badge.className.includes('idle')) {
+        badge.textContent = `● Auto-fetch in ${secs}s`;
+      }
+    }, 1000);
   }
 
   function stopRefreshing() {
     if (polling) { clearInterval(polling); polling = null; }
     const btn = document.getElementById('refreshBtn');
     btn.disabled = false;
-    btn.innerHTML = '<span>🔄</span> Refresh';
+    btn.innerHTML = '<span>⚡</span> Fetch';
     document.getElementById('statusBadge').className = 'job-badge idle';
     document.getElementById('statusBadge').textContent = '● Idle';
     document.getElementById('progressBar').style.display = 'none';
     loadSessions(false);
     loadStats();
+    resetCountdown();
   }
 
   // ── Detail panel ─────────────────────────────────────────────────────────────
@@ -461,6 +596,7 @@
       document.getElementById('dpSessionId').textContent = sessionId;
       document.getElementById('tabConversation').innerHTML = '<p class="no-data">Loading…</p>';
       document.getElementById('tabResultJson').innerHTML  = '<p class="no-data">Loading…</p>';
+      document.getElementById('tabRefData').innerHTML     = '<p class="no-data">Loading…</p>';
       document.getElementById('tabAnalysis').innerHTML    = buildAnalysis(s);
       document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
       document.querySelector('.dtab[data-tab="analysis"]').classList.add('active');
@@ -485,8 +621,8 @@
     document.getElementById('dpSessionId').textContent = sessionId;
     document.getElementById('tabAnalysis').innerHTML    = buildAnalysis(s);
     document.getElementById('tabConversation').innerHTML = buildConversation(s.conversation || []);
-    document.getElementById('tabResultJson').innerHTML  =
-      `<pre>${esc(JSON.stringify(s.result_json || {}, null, 2))}</pre>`;
+    document.getElementById('tabResultJson').innerHTML  = buildResultJson(s.result_json);
+    document.getElementById('tabRefData').innerHTML     = buildReferenceData(s.reference_data);
 
     document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
     document.querySelector('.dtab[data-tab="analysis"]').classList.add('active');
@@ -507,7 +643,7 @@
     document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
     btn.classList.add('active');
     document.querySelectorAll('.tab-pane').forEach(p => p.style.display = 'none');
-    const map = { analysis:'tabAnalysis', conversation:'tabConversation', resultjson:'tabResultJson' };
+    const map = { analysis:'tabAnalysis', conversation:'tabConversation', resultjson:'tabResultJson', refdata:'tabRefData' };
     document.getElementById(map[tab]).style.display = 'block';
   }
 
@@ -521,13 +657,15 @@
     const hasData = (s.conversation && s.conversation.length > 0) || s.result_json || s.msg_count > 0;
 
     if (!hasRealAI) {
-      const isAnalyzing = analyzingId === s.session_id;
+      const isAnalyzing = analyzingId === s.session_id || autoAnalyzingIds.has(s.session_id);
       return `
       <div class="not-analyzed-box">
-        <div style="font-size:32px;margin-bottom:12px;">${isAnalysisError ? '❌' : '🔍'}</div>
+        <div style="font-size:32px;margin-bottom:12px;">${isAnalysisError ? '❌' : isAnalyzing ? '🤖' : '🔍'}</div>
         ${hasData
           ? isAnalyzing
-            ? `<p>Analyzing…</p><button class="btn-analyze-lg" disabled><span class="spin">⏳</span> Running…</button>`
+            ? `<p style="font-weight:600;">AI is analyzing this session…</p>
+               <p style="color:var(--text4);font-size:13px;">This usually takes 5–15 seconds. The result will appear automatically.</p>
+               <button class="btn-analyze-lg analyzing-pulse" disabled><span class="spin">⚡</span> Analyzing…</button>`
             : isAnalysisError
               ? `<p style="color:#ef4444;">Previous analysis failed:<br><code style="font-size:12px">${esc(analysis.summary)}</code></p>
                  <button class="btn-analyze-lg" onclick="runAnalyzeFromPanel('${s.session_id}')">🔄 Retry Analysis</button>`
@@ -545,49 +683,376 @@
     </div>`;
 
     if (analysis.extractor_rating != null) {
-      const r = analysis.extractor_rating;
+      // Show effective rating (original + dismissal bonus) if dismissals exist
+      const origR = analysis.extractor_rating;
+      const dismissed = s.dismissed_issues || [];
+      const bonus = dismissed.reduce((acc, i) => {
+        const iss = issues[i];
+        return acc + (iss ? (iss.severity === 'high' ? 2 : 1) : 0);
+      }, 0);
+      const r = s.effective_rating != null ? s.effective_rating
+              : Math.min(10, Math.max(1, origR + bonus));
       const rCls = r>=8?'r-good':r>=5?'r-mid':'r-low';
+      const changed = bonus > 0;
       html += `
     <div class="rating-box">
       <div class="rating-header">
         <span class="rating-label">🎯 Extractor Accuracy</span>
-        <span class="rating-pill ${rCls}" style="font-size:13px;padding:4px 12px;">${r}/10</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          ${changed ? `<span style="font-size:11px;color:var(--text3);text-decoration:line-through;">${origR}/10</span>` : ''}
+          <span class="rating-pill ${rCls}" style="font-size:13px;padding:4px 12px;">${r}/10</span>
+        </div>
       </div>
       <div class="rating-bar-track"><div class="rating-bar-fill ${rCls}" style="width:${r*10}%"></div></div>
       ${analysis.rating_reason ? `<p class="rating-reason">${esc(analysis.rating_reason)}</p>` : ''}
+      ${changed ? `<p class="rating-reason" style="color:var(--text3);">⚑ ${dismissed.length} dismissed issue${dismissed.length>1?'s':''} not counted</p>` : ''}
     </div>`;
     }
 
-    if (s.scrape_error) html += `<div class="alert-box">⚠️ Scrape error: ${esc(s.scrape_error)}</div>`;
+    if (s.scrape_error) html += `<div class="alert-box">⚠️ Fetch error: ${esc(s.scrape_error)}</div>`;
 
     if (issues.length) {
-      html += `<h4 class="issues-heading">Issues Found (${issues.length})</h4>`;
-      html += issues.map(issue => `
-      <div class="issue-card sev-${issue.severity||'medium'}">
-        <div class="issue-meta">
-          <span class="issue-type">${issue.type||'issue'}</span>
-          <span class="issue-sev sev-${issue.severity}">${issue.severity||'medium'}</span>
+      const dismissed = s.dismissed_issues || [];
+      const activeCount = issues.filter((_, i) => !dismissed.includes(i)).length;
+      const dimCount    = issues.length - activeCount;
+
+      html += `<div class="issues-heading-row">
+        <h4 class="issues-heading">Issues Found
+          <span class="issues-count-badge">${activeCount}</span>
+          ${dimCount ? `<span class="issues-dim-badge" title="${dimCount} dismissed">${dimCount} dismissed</span>` : ''}
+        </h4>
+        <div class="issues-heading-actions">
+          ${activeCount > 0 ? `<button class="btn-dismiss-all" onclick="dismissAllIssues('${s.session_id}', false)">✓ Dismiss All</button>` : ''}
+          ${dimCount > 0 ? `<button class="btn-restore-all" onclick="dismissAllIssues('${s.session_id}', true)">↩ Restore All</button>` : ''}
+          ${dimCount ? `<button class="btn-show-dismissed" onclick="toggleDismissed(this)">Show dismissed</button>` : ''}
         </div>
-        <div class="issue-field"><strong>Field:</strong> <code>${esc(issue.field||'—')}</code></div>
-        <div class="issue-desc">${esc(issue.description||'')}</div>
-        ${issue.expected ? `<div class="issue-exp"><strong>Expected:</strong> ${esc(issue.expected)}</div>` : ''}
-        ${issue.actual   ? `<div class="issue-act"><strong>Actual:</strong> ${esc(String(issue.actual))}</div>` : ''}
-      </div>`).join('');
+      </div>`;
+
+      html += issues.map((issue, idx) => {
+        const isDismissed = dismissed.includes(idx);
+        return `
+        <div class="issue-card sev-${issue.severity||'medium'}${isDismissed ? ' issue-dismissed' : ''}" id="issue-${s.session_id.slice(0,8)}-${idx}" data-dismissed="${isDismissed}"${isDismissed ? ' style="display:none"' : ''}>
+          <div class="issue-card-top">
+            <div class="issue-meta">
+              <span class="issue-type">${issue.type||'issue'}</span>
+              <span class="issue-sev sev-${issue.severity}">${issue.severity||'medium'}</span>
+            </div>
+            <button class="btn-dismiss-issue" title="${isDismissed ? 'Restore this issue' : 'Mark as incorrect / dismiss'}"
+              onclick="dismissIssue('${s.session_id}', ${idx}, ${isDismissed})">
+              ${isDismissed ? '↩ Restore' : '✓ Dismiss'}
+            </button>
+          </div>
+          <div class="issue-field"><strong>Field:</strong> <code>${esc(issue.field||'—')}</code></div>
+          <div class="issue-desc">${esc(issue.description||'')}</div>
+          ${issue.expected ? `<div class="issue-exp"><strong>Expected:</strong> ${esc(issue.expected)}</div>` : ''}
+          ${issue.actual   ? `<div class="issue-act"><strong>Actual:</strong> ${esc(String(issue.actual))}</div>` : ''}
+          ${isDismissed ? `<div class="issue-dismissed-note">⚑ Marked as incorrect — not counted in rating</div>` : ''}
+        </div>`;
+      }).join('');
     } else {
       html += `<div class="all-good">✅ All data correctly captured — no issues found!</div>`;
     }
     return html;
   }
 
+  async function dismissIssue(sessionId, idx, isCurrentlyDismissed) {
+    const cardId = `issue-${sessionId.slice(0,8)}-${idx}`;
+    const card = document.getElementById(cardId);
+    if (card) card.style.opacity = '0.5';
+
+    try {
+      const url = `/api/db/sessions/${sessionId}/issues/${idx}${isCurrentlyDismissed ? '?restore=true' : ''}`;
+      const res = await fetch(url, { method: 'PATCH' });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+
+      // Update local session cache — keep original extractor_rating intact
+      const s = sessions.find(x => x.session_id === sessionId);
+      if (s) {
+        s.dismissed_issues = data.dismissed_issues;
+        s.analysis_status  = data.analysis_status;
+        // Store effective_rating separately; extractor_rating stays as original AI value
+        s.effective_rating = data.effective_rating;
+        if (s.analysis) {
+          s.analysis.overall_status = data.analysis_status;
+        }
+      }
+
+      // Re-render analysis tab
+      const panelId = document.getElementById('dpSessionId').textContent;
+      if (panelId === sessionId) {
+        const target = sessions.find(x => x.session_id === sessionId);
+        if (target) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(target);
+      }
+
+      // Re-render table row badge + issue count + rating
+      renderTableRow(sessionId);
+      loadStats();
+    } catch(e) {
+      console.error('dismissIssue error', e);
+      if (card) card.style.opacity = '';
+      alert('Failed to update issue: ' + e.message);
+    }
+  }
+
+  async function dismissAllIssues(sessionId, restore) {
+    const tabEl = document.getElementById('tabAnalysis');
+    if (tabEl) tabEl.style.opacity = '0.6';
+
+    try {
+      const url = `/api/db/sessions/${sessionId}/issues/dismiss-all${restore ? '?restore=true' : ''}`;
+      const res = await fetch(url, { method: 'PATCH' });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+
+      const s = sessions.find(x => x.session_id === sessionId);
+      if (s) {
+        s.dismissed_issues = data.dismissed_issues;
+        s.analysis_status  = data.analysis_status;
+        s.effective_rating = data.effective_rating;
+        if (s.analysis) s.analysis.overall_status = data.analysis_status;
+      }
+
+      const panelId = document.getElementById('dpSessionId').textContent;
+      if (panelId === sessionId) {
+        const target = sessions.find(x => x.session_id === sessionId);
+        if (target) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(target);
+      }
+
+      renderTableRow(sessionId);
+      loadStats();
+    } catch(e) {
+      console.error('dismissAll error', e);
+      alert('Failed to dismiss all: ' + e.message);
+    } finally {
+      if (tabEl) tabEl.style.opacity = '';
+    }
+  }
+
+  function toggleDismissed(btn) {
+    const panel = btn.closest('.dp-body') || document.getElementById('tabAnalysis');
+    const dimCards = panel.querySelectorAll('.issue-card.issue-dismissed');
+    // Cards start hidden; "Show dismissed" reveals them, "Hide dismissed" hides them
+    const currentlyShowing = btn.textContent.trim().startsWith('Hide');
+    dimCards.forEach(c => c.style.display = currentlyShowing ? 'none' : 'block');
+    btn.textContent = currentlyShowing ? 'Show dismissed' : 'Hide dismissed';
+  }
+
+  function renderTableRow(sessionId) {
+    const s = sessions.find(x => x.session_id === sessionId);
+    if (!s) return;
+    const row = document.querySelector(`.tbl-row[data-sid="${sessionId}"]`);
+    if (!row) return;
+
+    // Update AI status badge
+    const badge = row.querySelector('.ai-badge');
+    if (badge) {
+      const st  = s.analysis_status || 'pending';
+      const cfg = AI_CFG[st] || AI_CFG.pending;
+      badge.textContent = cfg.icon + ' ' + cfg.label;
+      badge.className   = 'ai-badge ' + cfg.cls;
+    }
+
+    // Update rating pill (use effective_rating if available, else original)
+    const ratingPill = row.querySelector('.rating-pill');
+    const dispRating = s.effective_rating != null ? s.effective_rating
+                     : (s.analysis ? s.analysis.extractor_rating : s.extractor_rating);
+    if (ratingPill && dispRating != null) {
+      ratingPill.textContent = dispRating + '/10';
+      ratingPill.className   = `rating-pill ${dispRating>=8?'r-good':dispRating>=5?'r-mid':'r-low'}`;
+    }
+
+    // Update active issue count (total minus dismissed)
+    const issueCnt = row.querySelector('.issue-cnt');
+    if (issueCnt) {
+      const allIssues  = (s.analysis ? s.analysis.issues : null) || [];
+      const dismissed  = s.dismissed_issues || [];
+      const activeCount = allIssues.filter((_, i) => !dismissed.includes(i)).length;
+      issueCnt.textContent = activeCount;
+      issueCnt.className   = `issue-cnt ${activeCount > 0 ? 'has-issues' : ''}`;
+    }
+  }
+
   function buildConversation(messages) {
     if (!messages || !messages.length) return '<p class="no-data">No conversation data.</p>';
-    return messages.map(m => {
-      const isBot = m.role.toLowerCase().includes('assistant');
+    const allText = messages.map(m => {
+      const role = (m.role||'').toLowerCase().includes('assistant')||(m.role||'').toLowerCase().includes('bot') ? 'Assistant' : 'User';
+      return `[${role}]: ${m.text || m.content || ''}`;
+    }).join('\n\n');
+    const cid = 'conv-' + Math.random().toString(36).slice(2);
+    let html = `<div class="conv-toolbar">
+      <span style="font-size:12px;color:var(--text4);">${messages.length} messages</span>
+      <button class="btn-copy" onclick="copyConv('${cid}')">📋 Copy All</button>
+    </div>
+    <div id="${cid}" class="conv-wrap">`;
+    html += messages.map((m) => {
+      const isBot = (m.role||'').toLowerCase().includes('assistant')||(m.role||'').toLowerCase().includes('bot');
+      const text = m.text || m.content || '';
+      const mid = 'msg-' + Math.random().toString(36).slice(2);
       return `<div class="msg ${isBot?'bot':'user'}">
-        <div class="msg-role">${isBot?'🤖 Assistant':'👤 User'}</div>
-        <div class="msg-text">${esc(m.text)}</div>
+        <div class="msg-header">
+          <span class="msg-role">${isBot ? '🤖 Assistant' : '👤 User'}</span>
+          <button class="copy-msg-btn" title="Copy message" onclick="
+            navigator.clipboard.writeText(document.getElementById('${mid}').textContent).then(()=>{this.textContent='✅';setTimeout(()=>this.textContent='⧉',1400)});
+          ">⧉</button>
+        </div>
+        <div class="msg-text" id="${mid}">${esc(text)}</div>
       </div>`;
     }).join('');
+    html += `</div>`;
+    // Store full text for copy-all
+    html += `<script>window['${cid}_text'] = ${JSON.stringify(allText)};<\/script>`;
+    return html;
+  }
+
+  function copyConv(cid) {
+    const text = window[cid + '_text'] || '';
+    navigator.clipboard.writeText(text).then(() => {
+      document.querySelectorAll(`[onclick*="copyConv('${cid}')"]`).forEach(b => {
+        b.textContent = '✅ Copied!'; setTimeout(() => b.textContent = '📋 Copy All', 1500);
+      });
+    });
+  }
+
+  function buildResultJson(json) {
+    if (!json || (typeof json === 'object' && !Object.keys(json).length)) {
+      return '<p class="no-data">No result JSON data available.</p>';
+    }
+    const str = JSON.stringify(json, null, 2);
+    const id = 'rjson-' + Math.random().toString(36).slice(2);
+    // Store raw string in data attribute so copyJson reads it without HTML-decode issues
+    return `
+    <div class="json-toolbar">
+      <span style="font-size:12px;color:var(--text4);">${Object.keys(json).length} top-level keys</span>
+      <button class="btn-copy" id="copybtn-${id}" onclick="copyJson('${id}')">📋 Copy</button>
+    </div>
+    <pre id="${id}" class="json-pre" data-raw="">${esc(str)}</pre>
+    <script>document.getElementById('${id}').dataset.raw = ${JSON.stringify(str)};<\/script>`;
+  }
+
+  function buildReferenceData(refData) {
+    if (!refData || typeof refData !== 'object' || !Object.keys(refData).length) {
+      return '<p class="no-data">No reference data available.</p>';
+    }
+
+    // Detect format: nested dict (live API) vs old flat emoji-key format (sessions.json)
+    const vals = Object.values(refData);
+    const isNested = vals.some(v => v && typeof v === 'object' && !Array.isArray(v));
+
+    const ICONS = { visa:'📄', hotel:'🏨', flight:'✈️', transfer:'🚗', transfer_vehicles:'🚌' };
+    const SKIP_COLS = new Set(['client_id','created_at','updated_at','deleted_at','file_path',
+                               'map_url','website','latitude','longitude','description','policy']);
+
+    const rid = 'rd-' + Math.random().toString(36).slice(2);
+    let html = `
+    <div class="rd-toolbar">
+      <input class="rd-search" type="text" placeholder="🔍 Search in reference data…"
+             oninput="filterRefData(this,'${rid}')">
+      <button class="btn-copy" onclick="copyRefData('${rid}')">📋 Copy All</button>
+    </div>
+    <div id="${rid}" class="rd-body">`;
+
+    if (isNested) {
+      // Live API format: {visa:{countries:[],suppliers:[],...}, hotel:{...}, ...}
+      for (const [sectionKey, sectionVal] of Object.entries(refData)) {
+        const icon  = ICONS[sectionKey] || '📦';
+        const label = icon + ' ' + sectionKey.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+        html += `<div class="rd-section" data-label="${esc(sectionKey)}">`;
+        html += `<div class="rd-section-title">${esc(label)}</div>`;
+        if (sectionVal && typeof sectionVal === 'object' && !Array.isArray(sectionVal)) {
+          for (const [subKey, subVal] of Object.entries(sectionVal)) {
+            html += `<div class="rd-subsection">`;
+            html += `<div class="rd-subsection-title">${esc(subKey.replace(/_/g,' '))}</div>`;
+            html += _renderRdValue(subVal, SKIP_COLS);
+            html += `</div>`;
+          }
+        } else {
+          html += _renderRdValue(sectionVal, SKIP_COLS);
+        }
+        html += `</div>`;
+      }
+    } else {
+      // Old flat format: {'👤 Customers (9)': [...], ...}
+      for (const [label, value] of Object.entries(refData)) {
+        html += `<div class="rd-section" data-label="${esc(label.toLowerCase())}">`;
+        html += `<div class="rd-section-title">${esc(label)}</div>`;
+        html += _renderRdValue(value, SKIP_COLS);
+        html += `</div>`;
+      }
+    }
+
+    html += `</div>`;
+    return html;
+  }
+
+  function _renderRdValue(value, skipCols) {
+    if (Array.isArray(value) && value.length > 0 && value[0] && typeof value[0] === 'object') {
+      const allCols = Object.keys(value[0]);
+      const cols = skipCols ? allCols.filter(c => !skipCols.has(c)) : allCols;
+      return `<div class="rd-table-wrap"><table class="rd-table">
+        <thead><tr>${cols.map(c=>`<th>${esc(c.replace(/_/g,' '))}</th>`).join('')}</tr></thead>
+        <tbody>${value.map(row=>`<tr>${cols.map(c=>{
+          const cell = row[c];
+          // Nested objects (like category in vehicle) — render as compact tag
+          if (cell && typeof cell === 'object') return `<td><span style="opacity:.6;font-size:11px;">${esc(JSON.stringify(cell).slice(0,60))}…</span></td>`;
+          return `<td>${esc(String(cell??'—'))}</td>`;
+        }).join('')}</tr>`).join('')}</tbody></table></div>`;
+    } else if (Array.isArray(value)) {
+      return `<div class="rd-tags">${value.map(v=>`<span class="rd-tag">${esc(String(v))}</span>`).join('')}</div>`;
+    } else if (value && typeof value === 'object') {
+      return `<div class="rd-tags">${Object.entries(value).map(([k,v])=>`<span class="rd-tag">${esc(k)}: <strong>${esc(String(v))}</strong></span>`).join('')}</div>`;
+    } else if (value !== null && value !== undefined) {
+      return `<span class="rd-tag">${esc(String(value))}</span>`;
+    }
+    return '<span class="rd-tag" style="opacity:.5">—</span>';
+  }
+
+  function filterRefData(input, rid) {
+    const q = input.value.toLowerCase();
+    document.querySelectorAll(`#${rid} .rd-section`).forEach(sec => {
+      const label = sec.dataset.label || '';
+      const text  = sec.textContent.toLowerCase();
+      sec.style.display = (!q || label.includes(q) || text.includes(q)) ? '' : 'none';
+    });
+  }
+
+  function copyRefData(rid) {
+    const el = document.getElementById(rid);
+    if (!el) return;
+    // Collect text from each section
+    const lines = [];
+    el.querySelectorAll('.rd-section').forEach(sec => {
+      const title = sec.querySelector('.rd-section-title');
+      if (title) lines.push(title.textContent);
+      sec.querySelectorAll('tr').forEach(row => {
+        lines.push(Array.from(row.querySelectorAll('th,td')).map(c => c.textContent).join('\t'));
+      });
+      sec.querySelectorAll('.rd-tag').forEach(t => lines.push(t.textContent));
+      lines.push('');
+    });
+    navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      const btns = document.querySelectorAll(`[onclick="copyRefData('${rid}')"]`);
+      btns.forEach(b => { b.textContent = '✅ Copied!'; setTimeout(() => b.textContent = '📋 Copy All', 1500); });
+    });
+  }
+
+  function copyJson(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    // Use stored raw string from dataset (avoids HTML-entity decode issues)
+    const text = el.dataset.raw || el.textContent;
+    const btn  = document.getElementById('copybtn-' + id);
+    navigator.clipboard.writeText(text).then(() => {
+      if (btn) { btn.textContent = '✅ Copied!'; setTimeout(() => btn.textContent = '📋 Copy', 1500); }
+    }).catch(() => {
+      // Fallback for non-HTTPS or blocked clipboard
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (btn) { btn.textContent = '✅ Copied!'; setTimeout(() => btn.textContent = '📋 Copy', 1500); }
+    });
   }
 
   function esc(str) {
@@ -600,6 +1065,51 @@
   loadStats();
   loadSessions(false);
   setInterval(() => { loadSessions(false); loadStats(); }, 60000);
+  startCountdown();
+
+  // Auto-fetch from API every 5 seconds (triggers full scrape cycle + updates UI)
+  setInterval(async () => {
+    if (polling) return; // already in an active refresh cycle
+    resetCountdown();
+    try {
+      const started = await fetch('/api/refresh', { method: 'POST' }).then(r => r.json()).catch(() => ({}));
+      if (started.started) startPolling();
+    } catch(e) {}
+  }, 5000);
+
+  // Always-on lightweight status poll: keeps auto-analysis spinners accurate
+  async function syncAnalyzingIds(ids) {
+    const incoming = new Set(ids);
+    let changed = false;
+    for (const id of incoming) {
+      if (!autoAnalyzingIds.has(id)) { autoAnalyzingIds.add(id); changed = true; }
+    }
+    for (const id of [...autoAnalyzingIds]) {
+      if (!incoming.has(id)) { autoAnalyzingIds.delete(id); changed = true; }
+    }
+    if (changed) {
+      renderTable(sessions);
+      // Refresh panel analysis tab if the open session is affected
+      const panelId = document.getElementById('dpSessionId').textContent;
+      const panelOpen = document.getElementById('detailPanel').classList.contains('open');
+      if (panelOpen && panelId) {
+        const s = sessions.find(x => x.session_id === panelId);
+        if (s && (autoAnalyzingIds.has(panelId) || incoming.has(panelId))) {
+          document.getElementById('tabAnalysis').innerHTML = buildAnalysis(s);
+        }
+      }
+    }
+  }
+
+  setInterval(async () => {
+    if (polling) return; // startPolling already calls status every 3s
+    const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
+    if ((d.analyzing || []).length > 0 || autoAnalyzingIds.size > 0) {
+      await syncAnalyzingIds(d.analyzing || []);
+      // Also reload sessions to pick up freshly-written analysis results
+      if (autoAnalyzingIds.size === 0) loadSessions(false);
+    }
+  }, 3000);
 </script>
 
 </body>

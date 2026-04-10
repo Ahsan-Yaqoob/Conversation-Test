@@ -57,16 +57,34 @@ def is_cached(session_id: str) -> bool:
 
 
 def get_cached_ids() -> set:
-    """Return IDs of sessions that are fully scraped and completed — these won't be re-scraped."""
+    """
+    Return IDs of sessions that should NOT be re-fetched:
+    - completed sessions that already have conversation/result data
+    """
     cache = load_cache()
-    completed = set()
+    skip = set()
     for sid, data in cache.items():
         status = (data.get('status') or '').lower()
         has_data = data.get('conversation') or data.get('result_json')
-        # Only skip re-scraping if completed AND we already have modal data
         if status == 'completed' and has_data:
-            completed.add(sid)
-    return completed
+            skip.add(sid)
+    return skip
+
+
+def get_cache_snapshot() -> dict:
+    """
+    Return a lightweight snapshot of the cache: {session_id: {status, msg_count}}
+    Used by the fetcher to detect changes in active sessions.
+    """
+    cache = load_cache()
+    return {
+        sid: {
+            'status': (data.get('status') or '').lower(),
+            'msg_count': data.get('msg_count', 0) or 0,
+            'has_data': bool(data.get('conversation') or data.get('result_json')),
+        }
+        for sid, data in cache.items()
+    }
 
 
 def get_all_sessions() -> dict:
