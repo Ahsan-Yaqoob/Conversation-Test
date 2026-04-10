@@ -6,3 +6,4 @@ python-dotenv
 apscheduler
 jinja2
 supabase>=2.0.0
+playwright>=1.40.0
