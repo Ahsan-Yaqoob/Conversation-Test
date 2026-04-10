@@ -3,11 +3,13 @@ services:
     name: conversation-test
     runtime: python
     pythonVersion: "3.11"
-    buildCommand: pip install -r requirements.txt && PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/ms-playwright PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 playwright install chromium
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /opt/render/project/src/ms-playwright
+      - key: PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS
+        value: "1"
       - key: SITE_API_KEY
         sync: false
       - key: GEMINI_API_KEY
