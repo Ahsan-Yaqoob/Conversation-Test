@@ -35,7 +35,23 @@ def _save_cache(cache: dict):
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
 
-def save_session(session_id: str, data: dict):
+def update_session_dismiss_state(session_id: str, analysis_status: str, dismissed_issues: list):
+    """
+    Sync dismiss state back into the JSON cache so backfill never overwrites it.
+    Called after every dismiss/restore DB update.
+    """
+    with _lock:
+        cache = load_cache()
+        if session_id not in cache:
+            return
+        session = cache[session_id]
+        if session.get('analysis'):
+            session['analysis']['overall_status'] = analysis_status
+        session['dismissed_issues'] = dismissed_issues
+        _save_cache(cache)
+
+
+def save_session(session_id: str, data: dict, reset_dismissed: bool = False):
     with _lock:
         cache = load_cache()
         cache[session_id] = data
@@ -43,7 +59,7 @@ def save_session(session_id: str, data: dict):
     # Sync to Supabase outside the lock (non-blocking, best-effort)
     try:
         from app.database import upsert_session
-        upsert_session(data)
+        upsert_session(data, reset_dismissed=reset_dismissed)
     except Exception as e:
         logger.warning(f"DB sync skipped for {session_id[:8]}: {e}")
 

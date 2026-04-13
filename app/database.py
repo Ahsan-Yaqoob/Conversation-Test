@@ -63,8 +63,11 @@ def _row_from_session(data: dict) -> dict:
     return {k: v for k, v in row.items() if k in row}
 
 
-def upsert_session(data: dict):
-    """Sync a session from the JSON cache to Supabase."""
+def upsert_session(data: dict, reset_dismissed: bool = False):
+    """
+    Sync a session from the JSON cache to Supabase.
+    reset_dismissed=True clears stale dismissed_issues when a fresh analysis is saved.
+    """
     global _table_missing_warned
     client = get_client()
     if not client:
@@ -73,6 +76,9 @@ def upsert_session(data: dict):
         row = _row_from_session(data)
         if not row.get('session_id'):
             return
+        # Clear old dismiss state so stale indices don't corrupt new analysis display
+        if reset_dismissed:
+            row['dismissed_issues'] = None
         client.table('sessions').upsert(row, on_conflict='session_id').execute()
         _table_missing_warned = False  # reset on success
     except Exception as e:
@@ -182,7 +188,10 @@ def get_stats_db() -> dict:
         completed_today  = _count(eq_status='completed', gte_scraped_at=today)
         completed_week   = _count(eq_status='completed', gte_scraped_at=week_ago)
         today_total      = _count(gte_scraped_at=today)
-        today_pct        = round(completed_today / today_total * 100) if today_total else 0
+        today_ok         = _count(gte_scraped_at=today, eq_analysis_status='ok')
+        today_err        = _count(gte_scraped_at=today, eq_analysis_status='error')
+        today_analyzed   = today_ok + today_err
+        today_pct        = round(today_ok / today_analyzed * 100) if today_analyzed else 0
 
         return {
             'total':           _count(),
@@ -276,6 +285,12 @@ def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> d
         }
         client.table('sessions').update(update).eq('session_id', session_id).execute()
         logger.info(f"dismiss_issue {session_id[:8]}… idx={issue_index} restore={restore} → {eff_status} eff_rating={eff_rating}")
+        # Sync back to cache so backfill never overwrites dismissed state
+        try:
+            from app.cache import update_session_dismiss_state
+            update_session_dismiss_state(session_id, eff_status, dismissed)
+        except Exception as ce:
+            logger.warning(f"Cache dismiss sync failed [{session_id[:8]}]: {ce}")
         return {
             **update,
             'orig_rating':      orig_rating,
@@ -320,6 +335,12 @@ def dismiss_all_issues(session_id: str, restore: bool = False) -> dict | None:
         }
         client.table('sessions').update(update).eq('session_id', session_id).execute()
         logger.info(f"dismiss_all {session_id[:8]}… restore={restore} → {eff_status} eff_rating={eff_rating}")
+        # Sync back to cache so backfill never overwrites dismissed state
+        try:
+            from app.cache import update_session_dismiss_state
+            update_session_dismiss_state(session_id, eff_status, dismissed)
+        except Exception as ce:
+            logger.warning(f"Cache dismiss sync failed [{session_id[:8]}]: {ce}")
         return {
             **update,
             'orig_rating':      orig_rating,

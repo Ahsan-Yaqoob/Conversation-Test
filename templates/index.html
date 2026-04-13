@@ -47,10 +47,10 @@
       <span class="stat-num" id="sn-comp-today">—</span>
       <span class="stat-lbl">✅ Completed Today</span>
     </div>
-    <div class="stat-card today-pct" id="stat-today-pct" title="% of today's sessions that are completed">
+    <div class="stat-card today-pct" id="stat-today-pct" title="% of today's analyzed sessions that are OK (ok / ok+error)">
       <span class="stat-num" id="sn-today-pct">—</span>
       <div class="okpct-track"><div class="okpct-fill" id="today-pct-bar" style="width:0%"></div></div>
-      <span class="stat-lbl">📊 Today Done %</span>
+      <span class="stat-lbl">✅ Today OK %</span>
     </div>
     <div class="stat-card err"  id="stat-err"  onclick="setFilter('status','error')"   title="Has errors">
       <span class="stat-num" id="sn-err">—</span>
@@ -311,12 +311,24 @@
       const d = await fetch(`/api/db/sessions?${params}`).then(r => r.json());
 
       // Normalize DB row → same shape the UI expects
-      // Preserve in-memory analysis if DB hasn't synced it yet (race guard)
+      // Preserve in-memory analysis if DB hasn't synced yet (race guard)
       const normalized = (d.sessions || []).map(s => {
         const nr = normRow(s);
-        if (!nr.analysis) {
-          const cached = sessions.find(x => x.session_id === s.session_id);
-          if (cached && cached.analysis) nr.analysis = cached.analysis;
+        const cached = sessions.find(x => x.session_id === s.session_id);
+        if (cached?.analysis) {
+          if (!nr.analysis) {
+            // DB has no analysis yet — keep in-memory result
+            nr.analysis = cached.analysis;
+            if (cached.effective_rating !== undefined) nr.effective_rating = cached.effective_rating;
+          } else {
+            // Both have analysis — keep whichever was analyzed more recently
+            const dbTs  = nr.analysis.analyzed_at  || '';
+            const memTs = cached.analysis.analyzed_at || '';
+            if (memTs > dbTs) {
+              nr.analysis = cached.analysis;
+              if (cached.effective_rating !== undefined) nr.effective_rating = cached.effective_rating;
+            }
+          }
         }
         return nr;
       });
@@ -613,6 +625,12 @@
         const full = await fetch(`/api/db/sessions/${sessionId}`).then(r => r.json());
         if (full && full.session_id) {
           const normalized = normRow(full);
+          // Race guard: if DB has no analysis yet but we already have it in-memory, keep it
+          const memSession = sessions.find(x => x.session_id === sessionId);
+          if (memSession?.analysis && !normalized.analysis) {
+            normalized.analysis = memSession.analysis;
+            normalized.effective_rating = memSession.effective_rating;
+          }
           s = normalized;
           const idx = sessions.findIndex(x => x.session_id === sessionId);
           if (idx >= 0) sessions[idx] = normalized;
@@ -652,11 +670,16 @@
 
   function buildAnalysis(s) {
     const analysis = s.analysis || {};
-    const isAnalysisError = analysis.overall_status === 'error' && (analysis.summary || '').startsWith('Analysis error:');
-    const hasRealAI = ['ok','warning','error'].includes(analysis.overall_status) && !isAnalysisError;
-    const status = hasRealAI ? analysis.overall_status : (isAnalysisError ? 'error' : 'pending');
+    // Use s.analysis_status (updated on every dismiss) as the authoritative status;
+    // fall back to analysis.overall_status for sessions loaded via scrape cache
+    const effectiveStatus = s.analysis_status || analysis.overall_status;
+    const isAnalysisError = effectiveStatus === 'error' && (analysis.summary || '').startsWith('Analysis error:');
+    const hasRealAI = ['ok','warning','error'].includes(effectiveStatus) && !isAnalysisError;
+    const status = hasRealAI ? effectiveStatus : (isAnalysisError ? 'error' : 'pending');
     const cfg = AI_CFG[status] || AI_CFG.pending;
     const issues = analysis.issues || [];
+    const dismissedArr = s.dismissed_issues || [];
+    const allDismissed = issues.length > 0 && dismissedArr.length === issues.length;
     const hasData = (s.conversation && s.conversation.length > 0) || s.result_json || s.msg_count > 0;
 
     if (!hasRealAI) {
@@ -679,17 +702,20 @@
       </div>`;
     }
 
+    const displaySummary = allDismissed
+      ? 'All issues dismissed — extraction accepted as correct.'
+      : (analysis.summary || 'No summary.');
+
     let html = `
     <div class="summary-box ${cfg.cls}">
       <span class="summary-icon">${cfg.icon}</span>
-      <div><strong>Overall: ${cfg.label}</strong><p>${esc(analysis.summary||'No summary.')}</p></div>
+      <div><strong>Overall: ${cfg.label}</strong><p>${esc(displaySummary)}</p></div>
     </div>`;
 
     if (analysis.extractor_rating != null) {
       // Show effective rating (original + dismissal bonus) if dismissals exist
       const origR = analysis.extractor_rating;
-      const dismissed = s.dismissed_issues || [];
-      const bonus = dismissed.reduce((acc, i) => {
+      const bonus = dismissedArr.reduce((acc, i) => {
         const iss = issues[i];
         return acc + (iss ? (iss.severity === 'high' ? 2 : 1) : 0);
       }, 0);
@@ -708,15 +734,14 @@
       </div>
       <div class="rating-bar-track"><div class="rating-bar-fill ${rCls}" style="width:${r*10}%"></div></div>
       ${analysis.rating_reason ? `<p class="rating-reason">${esc(analysis.rating_reason)}</p>` : ''}
-      ${changed ? `<p class="rating-reason" style="color:var(--text3);">⚑ ${dismissed.length} dismissed issue${dismissed.length>1?'s':''} not counted</p>` : ''}
+      ${changed ? `<p class="rating-reason" style="color:var(--text3);">⚑ ${dismissedArr.length} dismissed issue${dismissedArr.length>1?'s':''} not counted</p>` : ''}
     </div>`;
     }
 
     if (s.scrape_error) html += `<div class="alert-box">⚠️ Fetch error: ${esc(s.scrape_error)}</div>`;
 
     if (issues.length) {
-      const dismissed = s.dismissed_issues || [];
-      const activeCount = issues.filter((_, i) => !dismissed.includes(i)).length;
+      const activeCount = issues.filter((_, i) => !dismissedArr.includes(i)).length;
       const dimCount    = issues.length - activeCount;
 
       html += `<div class="issues-heading-row">
@@ -732,7 +757,7 @@
       </div>`;
 
       html += issues.map((issue, idx) => {
-        const isDismissed = dismissed.includes(idx);
+        const isDismissed = dismissedArr.includes(idx);
         return `
         <div class="issue-card sev-${issue.severity||'medium'}${isDismissed ? ' issue-dismissed' : ''}" id="issue-${s.session_id.slice(0,8)}-${idx}" data-dismissed="${isDismissed}"${isDismissed ? ' style="display:none"' : ''}>
           <div class="issue-card-top">

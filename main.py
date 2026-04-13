@@ -109,7 +109,8 @@ async def analyze_one(session_id: str):
     analysis = analyze_session(session)
     analysis['analyzed_at'] = datetime.now(timezone.utc).isoformat()
     session['analysis'] = analysis
-    save_session(session_id, session)
+    # reset_dismissed=True clears stale dismissed_issues from any prior analysis
+    save_session(session_id, session, reset_dismissed=True)
     logger.info(
         f"Analyzed {session_id[:8]} → {analysis.get('overall_status')} "
         f"({len(analysis.get('issues', []))} issues)"

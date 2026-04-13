@@ -56,7 +56,8 @@ def run_analysis_safe(session_id: str, session_data: dict) -> dict | None:
         analysis = analyze_session(session)
         analysis['analyzed_at'] = datetime.now(timezone.utc).isoformat()
         session['analysis'] = analysis
-        save_session(session_id, session)
+        # reset_dismissed=True clears stale dismissed_issues from any prior analysis
+        save_session(session_id, session, reset_dismissed=True)
         logger.info(
             f"Auto-analyzed {session_id[:8]} → {analysis.get('overall_status')} "
             f"({len(analysis.get('issues', []))} issues, rating={analysis.get('extractor_rating')})"
@@ -80,6 +81,8 @@ def _format_conversation(messages: list) -> str:
 
 
 def _format_reference_data(ref_data: dict) -> str:
+    if not ref_data:
+        return "(no reference data available)"
     lines = []
     for section, items in ref_data.items():
         lines.append(f"\n## {section}")
@@ -89,6 +92,22 @@ def _format_reference_data(ref_data: dict) -> str:
                     lines.append("  - " + ", ".join(f"{k}: {v}" for k, v in item.items()))
             else:
                 lines.append("  " + ", ".join(str(x) for x in items))
+        elif isinstance(items, dict):
+            for k, v in items.items():
+                lines.append(f"  {k}: {v}")
+
+    # Highlight room type → pax capacity mapping explicitly for the AI
+    room_types = ref_data.get('room_types') or ref_data.get('roomTypes') or []
+    if room_types and isinstance(room_types, list) and isinstance(room_types[0], dict):
+        pax_keys = [k for k in room_types[0] if 'pax' in k.lower() or 'capacity' in k.lower() or 'person' in k.lower()]
+        name_keys = [k for k in room_types[0] if 'name' in k.lower() or 'type' in k.lower() or 'title' in k.lower()]
+        if pax_keys and name_keys:
+            lines.append("\n## ROOM TYPE PAX CAPACITY SUMMARY (use this to validate room_quantities)")
+            for rt in room_types:
+                name = rt.get(name_keys[0], '?')
+                pax  = rt.get(pax_keys[0], '?')
+                lines.append(f"  - {name} = {pax} pax")
+
     return '\n'.join(lines)
 
 
@@ -127,7 +146,19 @@ from the user conversation into the result JSON, using the available reference d
 {ref_text}
 
 === YOUR TASK ===
-Carefully identify REAL errors only. Use the following rules strictly:
+Carefully identify REAL errors only. Use the following rules strictly.
+
+⛔ BEFORE YOU WRITE A SINGLE ISSUE, REMEMBER THESE THREE UNBREAKABLE RULES:
+  A) The JSON stores ONLY the LOWEST-PAX room type name. Never flag missing higher-pax room type names.
+  B) The JSON stores ONLY the price for the LOWEST-PAX room type. Never flag missing higher-pax room prices — not individually, and NOT bundled under any invented field like `room_prices`, `prices`, or similar.
+  C) Never invent a field name. Only flag fields that actually exist (or are truly required) in the result JSON.
+
+**SYSTEM MESSAGE RULE (critical):**
+- Messages in the conversation that begin with `[SYSTEM]` are **system-injected automated messages**, NOT actual user input.
+- Common system messages include "Python database match confirmed. Lead passenger details are COMPLETE — do not ask about them again:" followed by auto-filled passenger data (name, email, mobile, currency, etc.).
+- Data that appears ONLY in a `[SYSTEM]` message (and was NOT explicitly stated by the real user in their own messages) is **auto-populated by the backend system**, not entered by the user.
+- Do NOT flag any field as missing_field or wrong_value based solely on data from a `[SYSTEM]` message — the system handles those fields automatically and they do not need to appear in the result JSON.
+- Only validate data that the actual human user explicitly stated in their own conversational messages.
 
 **DATE FORMAT RULE (critical):**
 - All dates in the JSON must be in ISO format: YYYY-MM-DD (e.g. 2026-04-10)
@@ -177,6 +208,14 @@ Each transfer object has a `supplier_mode` field: `"existing"` or `"new"`.
   * Describe: "User mentioned X hotel(s) but JSON contains Y hotel entries"
 - Multiple room types for the SAME hotel do NOT require multiple hotel entries — they should be in ONE hotel object
 
+**PER-PERSON vs PER-SERVICE CALCULATION RULE (critical):**
+- Check the `calculation_type` field in the result JSON (e.g. `"per_person"` or `"per_service"`).
+- **If `calculation_type = "per_person"`:** The system automatically copies room_type, room_type_id, room_quantities, extra_beds, and all room-related fields from `hotels[0]` to ALL subsequent hotels (hotels[1], hotels[2], etc.). This is correct system behaviour — the same room configuration applies to all hotels.
+  * Do NOT validate room_quantities, room_type, extra_beds, or any room fields for hotels[1] and beyond against what the user said for those hotels.
+  * Do NOT flag hotels[1+] room data even if it differs from what the user specified for that specific hotel — it is always a copy of hotels[0].
+  * Only validate room-related fields for `hotels[0]` when calculation_type is per_person.
+- **If `calculation_type = "per_service"`:** Each hotel is independent. Validate each hotel's room fields against what the user explicitly stated for that specific hotel.
+
 **PAX-SIZE DESCRIPTOR RULE (critical — read before checking room type or quantities):**
 The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
   Single (1 pax), Double (2 pax), Twin (2 pax), Triple (3 pax), Quad (4 pax), 5-pax, 6-pax, etc.
@@ -188,40 +227,78 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 - Only flag `room_type` if it is set to something completely unrelated to what the user mentioned.
 
 **ROOM QUANTITIES for same-pax types (Twin + Double):**
-- When user mentions both Twin and Double (both 2pax), the AI stores only ONE of their counts in `qty_2pax` (not the sum).
+- When user mentions both Twin and Double (both 2pax), the AI stores only ONE of their counts in `qty_2pax` (not the sum, not the other's count).
 - Accept qty_2pax equal to the count of EITHER Twin OR Double as stated by user — both are valid.
 - Example: user says "1 Double 2 Twin" → qty_2pax=1 OR qty_2pax=2 are BOTH acceptable. Do NOT flag either.
 - Only flag qty_2pax if the value doesn't match any individual count the user stated (e.g. user said "1 Double 2 Twin" but qty_2pax=5 → flag).
 
+**SAME-PAX COLLAPSING RULE (critical):**
+- This applies to ALL room types, not just Twin/Double. Any two room types that share the same pax capacity from the reference data are treated as the SAME pax slot.
+- When two room types have the same pax capacity, the AI stores ONLY ONE of them (the base room type) and its count in `qty_Xpax`. The other room type is simply ignored in room_quantities — this is correct behaviour.
+- Example: if "Quad"=4pax and "Delux11"=4pax, then "1 Quad 1 Delux11" → `qty_4pax=1` is CORRECT — do NOT flag it as wrong or missing.
+- Do NOT expect qty_Xpax to be the SUM of same-pax rooms. The system stores the count for ONE of them only.
+- Use the REFERENCE DATA to look up each room type's pax capacity. If two room types have the same pax, accept the qty matching either one's individual count as correct.
+
 - Room quantities in the JSON (e.g. qty_2pax, qty_3pax) represent NUMBER OF ROOMS of that pax capacity — do NOT treat them as people counts
-- ROOM QUANTITIES CHECK (for non-same-pax types):
-  * Standard pax capacity mapping: Single=1pax, Double=2pax, Twin=2pax, Triple=3pax, Quad=4pax
-  * Example: user says "2 Double 3 Triple" → qty_2pax must be 2, qty_3pax must be 3
-  * If qty value is genuinely wrong → flag as wrong_value (high severity)
-  * If qty is off by 1 due to extra bed rounding → flag as wrong_value (low severity)
+- **DATABASE ROOM TYPE PAX RULE (critical):** Room types are NOT limited to standard names (Single, Double, Twin, Triple, Quad). Types like "Delux", "Premium", "Executive", "Suite", "Penthouse" etc. are real room types in the database and each has its own pax capacity stored in the system (e.g. Delux may be 3pax, Premium may be 7pax). The AI correctly looks up each room type's pax capacity from the database and sets the corresponding `qty_Xpax` field. You CANNOT know the exact pax capacity from the room type name alone. Therefore:
+  * Do NOT flag any `qty_Xpax` entry as wrong just because you don't recognize the pax number for a named room type
+  * Do NOT flag `qty_7pax`, `qty_5pax`, `qty_6pax` etc. as unexpected — these are valid capacities for non-standard room types from the database
+  * ONLY flag qty values if the count of rooms is wrong (e.g. user said "2 Delux" but qty shows 1)
+- ROOM QUANTITIES CHECK (for standard types only):
+  * Standard pax mapping: Single=1pax, Double=2pax, Twin=2pax, Triple=3pax, Quad=4pax
+  * Example: user says "2 Double 3 Triple" (no same-pax collision) → qty_2pax=2, qty_3pax=3
+  * If two room types share the same pax (e.g. Twin+Double, Quad+Delux11), apply SAME-PAX COLLAPSING RULE above instead
+  * If qty count is genuinely wrong with no same-pax explanation → flag as wrong_value (high severity)
 - Do NOT validate or flag `room_count` — it is auto-calculated by the system
 - Do NOT validate or flag `weekday_price` or `weekend_price` fields on individual rooms — these are auto-calculated by the system, not set by the AI
-- ROOM TYPE rule: The AI captures only the BASE (lowest capacity) room type in the `room_type` field. If user requests multiple room types (e.g. "1 Delux and 1 Triple"), the AI correctly stores only the smaller room type (Triple). Do NOT flag a missing room type for the higher room types — this is correct system behavior.
+- **ROOM PRICE RULE (critical):** The system ONLY stores the price for the BASE room type (= the room type with the LOWEST pax capacity). Prices for ALL other room types are NOT stored anywhere in the JSON — not individually, and NOT in any bundled field like `room_prices`. Do NOT flag missing prices for any room type that is NOT the lowest-pax one, regardless of what the user stated or the order they mentioned it. Even if the user stated 3 different prices, only 1 (the lowest-pax room's price) is expected. This is by design.
+- **ROOM TYPE rule:** The AI captures only the BASE room type (LOWEST pax capacity) in `room_type` and `room_type_id`. Order of mention does NOT matter — the system always picks the lowest-pax room type as the base.
+  * Example: user says "1 Executive Suite (4pax) 1 Twin (2pax)" → base = Twin (2pax) → `room_type="Twin"`, price = Twin's price → CORRECT. Do NOT flag this.
+  * Example: user says "1 Delux (3pax) 1 Single (1pax)" → base = Single (1pax) → CORRECT.
+  * Do NOT flag `room_type` or `room_type_id` just because a different room type was mentioned first by the user — only the lowest-pax room matters.
+  * Do NOT flag the price as wrong if it matches the LOWEST-pax room type's price, even if a higher-pax room was mentioned first.
 
 **CUSTOM / NEW ROOM TYPE RULE (critical):**
-- When the user specifies a room type that is NOT in the reference data (e.g. "Penthouse", "Executive Suite", a custom name), the system may store it in `room_type` OR in an alternate field such as `new_room_type`, `custom_room_type`, or any similar field on the hotel object.
-- To check if the user's room type was captured: look at ALL room-type-related fields (`room_type`, `new_room_type`, `custom_room_type`, etc.).
-- Only flag as `wrong_value` or `missing_field` if the user's stated room type name is **completely absent** from ALL room-type-related fields.
+- ⚠️ THIS RULE APPLIES ONLY TO THE FIRST/BASE ROOM TYPE. Secondary room type names are NEVER stored — do not apply this rule to them.
+- When the user's FIRST/BASE room type is NOT in the reference data (e.g. "Penthouse", "Executive Suite", a custom name), the system may store it in `room_type` OR in an alternate field such as `new_room_type`, `custom_room_type`, or any similar field on the hotel object.
+- To check if the BASE room type was captured: look at ALL room-type-related fields (`room_type`, `new_room_type`, `custom_room_type`, etc.).
+- Only flag as `wrong_value` or `missing_field` if the user's BASE room type name is **completely absent** from ALL room-type-related fields.
 - If the value exists in ANY of those fields (even if `room_type` itself is empty), do NOT flag it — the value has been captured correctly.
 - Do NOT flag an empty `room_type` field if the custom name appears in `new_room_type` or another variant field.
+- Do NOT apply this rule to the 2nd, 3rd, or any additional room type mentioned by the user — their names are simply not stored by design.
+- **NEW ROOM TYPE POSITION RULE (critical):**
+  * The frontend form enforces: a custom/new room type (not in the reference data) can ONLY be used as a secondary (non-base) room type if its pax capacity is GREATER than the base room type's pax.
+  * If the custom/new room type has LOWER pax than the defined base room type → the custom type MUST be the base, not secondary.
+  * Scenario to flag: result JSON shows a defined room type (e.g. Twin=2pax) as base, but the user also mentioned a custom/new room type with explicitly stated lower pax (e.g. 1pax) → flag as `wrong_value` (high): "The new/custom room type has lower pax than the base room type. It must be set as the base (lowest pax / first) room type."
+  * IMPORTANT: Only flag this if the custom room type's pax was explicitly stated by the user in the conversation, OR is clearly derivable from context. If pax is unknown for the custom type → do NOT flag.
+  * Do NOT flag if the custom room type's pax is GREATER than or EQUAL to the base room type's pax — that is valid and correct.
 - Extra bed COUNT rule (critical):
   * extra_beds = (number of DISTINCT PAX CAPACITIES mentioned by user) - 1
-  * Twin and Double are BOTH 2pax = 1 distinct capacity. "1 Twin 1 Double" → 1 distinct capacity → extra_beds = 0
+  * Use REFERENCE DATA to find each room type's pax capacity. Two room types with the SAME pax = 1 distinct capacity.
+  * Twin and Double are BOTH 2pax = 1 distinct capacity. "1 Twin 1 Double" → 1 distinct → extra_beds = 0
+  * Example: user says "1 Quad 1 Dupplex" — if reference data shows both are 4pax → 1 distinct capacity → extra_beds = 0
   * Example: user says "1 Double, 2 Triple" → capacities: 2pax, 3pax → 2 distinct → extra_beds = 1
-  * Example: user says "1 Twin, 1 Double" → BOTH 2pax → 1 distinct capacity → extra_beds = 0
   * Example: user says "2 Double, 3 Triple, 1 Quad" → 2pax, 3pax, 4pax → 3 distinct → extra_beds = 2
-  * Flag as wrong_value (high) if the extra_beds value doesn't match this formula
+  * Example: user says "1 Triple, 1 Delux, 1 Premium" → if all have different pax from DB → 3 distinct → extra_beds = 2
+  * IMPORTANT: If you cannot find a room type's pax in the reference data, do NOT guess its pax capacity — skip flagging extra_beds in that case
+  * Flag as wrong_value (high) ONLY if extra_beds clearly doesn't match the formula AND you have confirmed pax capacities from the reference data for all room types mentioned
 - Extra bed CHARGE rule:
   * If the user explicitly states an extra bed price → that exact price must be used → flag wrong_value if different
   * If the user does NOT state a price → system calculates: (price of 2nd/higher room type) minus (price of 1st/lower room type)
   * Example: "2 Double of 200, 2 Triple of 300" → extra bed charge = 300 - 200 = 100
   * The extra bed charge is a SINGLE value, not stored separately per room type
   * Do NOT flag the extra bed charge if it matches this formula and the user didn't specify a price
+
+⛔ ABSOLUTE RULES — NEVER VIOLATE THESE — READ BEFORE WRITING ANY ISSUE:
+
+1. **NEVER flag a missing room type name for any room type that is NOT the lowest-pax one.**
+   The system stores ONLY the lowest-pax room type name in `room_type`. All higher-pax room type names are NEVER stored anywhere in the JSON. There is NO field for them. Do NOT invent field names like `room_type_premium_name`, `room_type_2`, or similar. If it is not in the JSON schema, it does not exist.
+
+2. **NEVER flag a missing or uncaptured price for any room type that is NOT the lowest-pax one.**
+   The system stores ONLY the price for the lowest-pax room type. Prices for all higher-pax room types are NEVER stored in the JSON — not in any field. Do NOT flag `room_type_premium_price`, `price_premium`, `room_prices`, or any invented field that groups multiple room prices. This is by design. Even if the user stated 3 different room prices, ONLY the lowest-pax room's price is expected in the JSON.
+
+3. **NEVER flag a field that does not exist in the actual result JSON.**
+   Only report issues for fields that are actually present in the JSON (with a wrong value) or fields that are genuinely required by the schema but missing. Do not invent field names.
 
 Return ONLY a valid JSON object — no markdown, no extra text:
 {{
