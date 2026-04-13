@@ -181,10 +181,12 @@ def get_stats_db() -> dict:
         ok_pct           = round(ok_completed / completed * 100) if completed else 0
         completed_today  = _count(eq_status='completed', gte_scraped_at=today)
         completed_week   = _count(eq_status='completed', gte_scraped_at=week_ago)
+        today_total      = _count(gte_scraped_at=today)
+        today_pct        = round(completed_today / today_total * 100) if today_total else 0
 
         return {
             'total':           _count(),
-            'today':           _count(gte_scraped_at=today),
+            'today':           today_total,
             'ok':              _count(eq_analysis_status='ok'),
             'warning':         _count(eq_analysis_status='warning'),
             'error':           _count(eq_analysis_status='error'),
@@ -194,6 +196,7 @@ def get_stats_db() -> dict:
             'ok_completed':    ok_completed,
             'completed_today': completed_today,
             'completed_week':  completed_week,
+            'today_pct':       today_pct,
         }
     except Exception as e:
         logger.error(f"DB stats error: {e}")
@@ -224,6 +227,10 @@ def _recompute_effective(issues: list, dismissed: list[int]) -> tuple[str | None
         2 if i.get('severity') == 'high' else 1
         for i in dismissed_issues
     )
+    # When all issues are dismissed → perfect score
+    if not remaining:
+        eff_status = 'ok'
+        bonus = 10  # will be capped properly by caller
     return eff_status, bonus
 
 
@@ -259,9 +266,8 @@ def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> d
                 dismissed.append(issue_index)
 
         eff_status, bonus = _recompute_effective(issues, dismissed)
-        # Compute effective rating for the response, but DO NOT save it —
-        # orig rating stays untouched so restore always works correctly
-        eff_rating = min(10, max(1, orig_rating + bonus)) if orig_rating else None
+        # When all dismissed bonus==10 → always 10; otherwise cap normally
+        eff_rating = 10 if bonus == 10 else (min(10, max(1, orig_rating + bonus)) if orig_rating else None)
 
         update = {
             'dismissed_issues': dismissed,
@@ -305,7 +311,7 @@ def dismiss_all_issues(session_id: str, restore: bool = False) -> dict | None:
         dismissed = [] if restore else list(range(len(issues)))
 
         eff_status, bonus = _recompute_effective(issues, dismissed)
-        eff_rating = min(10, max(1, orig_rating + bonus)) if orig_rating else None
+        eff_rating = 10 if bonus == 10 else (min(10, max(1, orig_rating + bonus)) if orig_rating else None)
 
         update = {
             'dismissed_issues': dismissed,

@@ -109,8 +109,28 @@ def run_scrape_and_analyze():
         _is_running = False
 
 
+def _get_scheduler_interval_minutes() -> float:
+    raw_interval = os.getenv('CRON_INTERVAL_MINUTES')
+    if raw_interval is None:
+        raise ValueError('CRON_INTERVAL_MINUTES is not set.')
+
+    try:
+        interval = float(raw_interval)
+    except ValueError as exc:
+        raise ValueError(
+            f"CRON_INTERVAL_MINUTES must be a positive number, got {raw_interval!r}."
+        ) from exc
+
+    if interval <= 0:
+        raise ValueError(
+            f"CRON_INTERVAL_MINUTES must be greater than 0, got {raw_interval!r}."
+        )
+
+    return interval
+
+
 def start_scheduler():
-    interval = int(os.getenv('CRON_INTERVAL_MINUTES', '5'))
+    interval = _get_scheduler_interval_minutes()
 
     _scheduler.add_job(
         run_scrape_and_analyze,

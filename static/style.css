@@ -993,6 +993,7 @@ body.dark .rating-bar-fill.r-low  { background: #b91c1c; }
 .stat-card.okpct .stat-num { color: #6366f1; }
 .stat-card.comp-today .stat-num { color: #10b981; }
 .stat-card.comp-week  .stat-num { color: #10b981; }
+.stat-card.today-pct .stat-num  { color: #0ea5e9; }
 
 /* OK % progress bar inside the card */
 .okpct-track {

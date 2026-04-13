@@ -202,6 +202,13 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 - Do NOT validate or flag `room_count` — it is auto-calculated by the system
 - Do NOT validate or flag `weekday_price` or `weekend_price` fields on individual rooms — these are auto-calculated by the system, not set by the AI
 - ROOM TYPE rule: The AI captures only the BASE (lowest capacity) room type in the `room_type` field. If user requests multiple room types (e.g. "1 Delux and 1 Triple"), the AI correctly stores only the smaller room type (Triple). Do NOT flag a missing room type for the higher room types — this is correct system behavior.
+
+**CUSTOM / NEW ROOM TYPE RULE (critical):**
+- When the user specifies a room type that is NOT in the reference data (e.g. "Penthouse", "Executive Suite", a custom name), the system may store it in `room_type` OR in an alternate field such as `new_room_type`, `custom_room_type`, or any similar field on the hotel object.
+- To check if the user's room type was captured: look at ALL room-type-related fields (`room_type`, `new_room_type`, `custom_room_type`, etc.).
+- Only flag as `wrong_value` or `missing_field` if the user's stated room type name is **completely absent** from ALL room-type-related fields.
+- If the value exists in ANY of those fields (even if `room_type` itself is empty), do NOT flag it — the value has been captured correctly.
+- Do NOT flag an empty `room_type` field if the custom name appears in `new_room_type` or another variant field.
 - Extra bed COUNT rule (critical):
   * extra_beds = (number of DISTINCT PAX CAPACITIES mentioned by user) - 1
   * Twin and Double are BOTH 2pax = 1 distinct capacity. "1 Twin 1 Double" → 1 distinct capacity → extra_beds = 0

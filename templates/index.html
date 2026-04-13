@@ -43,13 +43,14 @@
       <span class="stat-num" id="sn-today">—</span>
       <span class="stat-lbl">Today</span>
     </div>
-    <div class="stat-card ok"  id="stat-ok"   onclick="setFilter('status','ok')"      title="No issues">
-      <span class="stat-num" id="sn-ok">—</span>
-      <span class="stat-lbl">✅ OK</span>
+    <div class="stat-card comp-today" id="stat-comp-today" onclick="setFilter('session','completed_today')" title="Completed sessions created today">
+      <span class="stat-num" id="sn-comp-today">—</span>
+      <span class="stat-lbl">✅ Completed Today</span>
     </div>
-    <div class="stat-card warn" id="stat-warn" onclick="setFilter('status','warning')" title="Minor issues">
-      <span class="stat-num" id="sn-warn">—</span>
-      <span class="stat-lbl">⚠️ Warning</span>
+    <div class="stat-card today-pct" id="stat-today-pct" title="% of today's sessions that are completed">
+      <span class="stat-num" id="sn-today-pct">—</span>
+      <div class="okpct-track"><div class="okpct-fill" id="today-pct-bar" style="width:0%"></div></div>
+      <span class="stat-lbl">📊 Today Done %</span>
     </div>
     <div class="stat-card err"  id="stat-err"  onclick="setFilter('status','error')"   title="Has errors">
       <span class="stat-num" id="sn-err">—</span>
@@ -59,18 +60,14 @@
       <span class="stat-num" id="sn-pend">—</span>
       <span class="stat-lbl">⏳ Pending</span>
     </div>
+    <div class="stat-card comp-week" id="stat-comp-week" onclick="setFilter('session','completed_week')" title="Completed sessions in last 7 days">
+      <span class="stat-num" id="sn-comp-week">—</span>
+      <span class="stat-lbl">✅ Done 7d</span>
+    </div>
     <div class="stat-card okpct" id="stat-okpct" onclick="setFilter('session','completed')" title="% of completed sessions rated OK by AI">
       <span class="stat-num" id="sn-okpct">—</span>
       <div class="okpct-track"><div class="okpct-fill" id="okpct-bar" style="width:0%"></div></div>
       <span class="stat-lbl" id="sn-okpct-sub" style="font-size:10px;margin-top:2px;">— of — completed</span>
-    </div>
-    <div class="stat-card comp-today" id="stat-comp-today" onclick="setFilter('session','completed_today')" title="Completed sessions created today">
-      <span class="stat-num" id="sn-comp-today">—</span>
-      <span class="stat-lbl">✅ Done Today</span>
-    </div>
-    <div class="stat-card comp-week" id="stat-comp-week" onclick="setFilter('session','completed_week')" title="Completed sessions in last 7 days">
-      <span class="stat-num" id="sn-comp-week">—</span>
-      <span class="stat-lbl">✅ Done 7d</span>
     </div>
   </div>
 
@@ -212,11 +209,16 @@
       // Only update each card if the value is actually present — never blank existing values
       if (d.total     != null) document.getElementById('sn-total').textContent = d.total;
       if (d.today     != null) document.getElementById('sn-today').textContent = d.today;
-      if (d.ok        != null) document.getElementById('sn-ok').textContent    = d.ok;
-      if (d.warning   != null) document.getElementById('sn-warn').textContent  = d.warning;
       if (d.error     != null) document.getElementById('sn-err').textContent   = d.error;
       if (d.pending   != null) document.getElementById('sn-pend').textContent  = d.pending;
-      // OK rate card
+      // Today Done % card
+      if (d.today_pct != null) {
+        document.getElementById('sn-today-pct').textContent = d.today_pct + '%';
+        const tbar = document.getElementById('today-pct-bar');
+        tbar.style.width = d.today_pct + '%';
+        tbar.style.background = d.today_pct >= 80 ? '#10b981' : d.today_pct >= 50 ? '#f59e0b' : '#ef4444';
+      }
+      // Total OK % card
       if (d.ok_pct != null) {
         const pct = d.ok_pct;
         document.getElementById('sn-okpct').textContent = pct + '%';
@@ -270,8 +272,6 @@
 
   function syncChips() {
     document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active-filter'));
-    if (fStatus === 'ok')              document.getElementById('stat-ok').classList.add('active-filter');
-    if (fStatus === 'warning')         document.getElementById('stat-warn').classList.add('active-filter');
     if (fStatus === 'error')           document.getElementById('stat-err').classList.add('active-filter');
     if (fStatus === 'pending')         document.getElementById('stat-pend').classList.add('active-filter');
     if (fDate   === 'today' && !fSessionStatus) document.getElementById('stat-today').classList.add('active-filter');
@@ -344,7 +344,10 @@
     const dismissed = s.dismissed_issues || [];
     const issues    = s.analysis_issues  || [];
     let effective_rating = s.extractor_rating;
-    if (dismissed.length && s.extractor_rating) {
+    if (issues.length && dismissed.length === issues.length) {
+      // All dismissed → perfect score
+      effective_rating = 10;
+    } else if (dismissed.length && s.extractor_rating) {
       const bonus = dismissed.reduce((sum, i) => {
         const sev = (issues[i] || {}).severity;
         return sum + (sev === 'high' ? 2 : 1);
