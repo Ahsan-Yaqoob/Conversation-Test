@@ -73,11 +73,14 @@ def run_scrape_and_analyze():
                     except Exception:
                         pass
                 continue
-            # Merge: preserve existing analysis + original scraped_at if already saved
+            # Merge: preserve existing analysis + dismissed state + original scraped_at
             from app.cache import get_session
             existing = get_session(session_id) or {}
             if existing.get('analysis'):
                 session['analysis'] = existing['analysis']
+            # Also preserve dismissed_issues so dismiss state survives re-scrape
+            if existing.get('dismissed_issues') is not None:
+                session['dismissed_issues'] = existing['dismissed_issues']
             # Preserve original scraped_at so old sessions don't float to top on re-scrape
             if existing.get('scraped_at') and not session.get('scrape_error'):
                 session['scraped_at'] = existing['scraped_at']
@@ -85,13 +88,35 @@ def run_scrape_and_analyze():
             new_count += 1
             logger.info(f"Saved session {session_id[:8]}…")
 
-            # Queue for auto-analysis if completed and not yet analyzed
+            # Queue for auto-analysis only if completed, has data, and not yet analyzed locally
             if (session.get('status', '').lower() == 'completed'
                     and not session.get('analysis')
                     and (session.get('conversation') or session.get('result_json'))):
                 to_analyze.append((session_id, session))
 
         _last_run = datetime.now(timezone.utc).isoformat()
+
+        # Guard: skip re-analysis for sessions already analyzed in DB (e.g. after ephemeral cache loss)
+        if to_analyze:
+            try:
+                from app.database import get_client
+                db_client = get_client()
+                if db_client:
+                    # Fetch analysis_status for all candidate sessions, filter in Python
+                    rows = db_client.table('sessions') \
+                        .select('session_id,analysis_status') \
+                        .in_('session_id', [sid for sid, _ in to_analyze]) \
+                        .execute().data or []
+                    already_analyzed = {
+                        r['session_id'] for r in rows
+                        if r.get('analysis_status') not in (None, '')
+                    }
+                    if already_analyzed:
+                        logger.info(f"Skipping re-analysis for {len(already_analyzed)} already-analyzed sessions: {[s[:8] for s in already_analyzed]}")
+                        to_analyze = [(sid, sess) for sid, sess in to_analyze if sid not in already_analyzed]
+            except Exception as e:
+                logger.warning(f"DB analysis-check skipped: {e}")
+
         logger.info(f"── Fetch complete. {new_count} saved, {len(to_analyze)} queued for auto-analysis. ──")
 
         # Spawn one background thread per session to analyze (concurrency-safe via lock in analyzer)

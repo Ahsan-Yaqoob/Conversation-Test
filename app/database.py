@@ -51,14 +51,20 @@ def _row_from_session(data: dict) -> dict:
         'conversation':     data.get('conversation'),
         'result_json':      data.get('result_json'),
         'reference_data':   data.get('reference_data'),
-        'analysis_status':  analysis.get('overall_status'),
-        'analysis_summary': analysis.get('summary'),
-        'analysis_issues':  analysis.get('issues'),
-        'extractor_rating': analysis.get('extractor_rating'),
-        'rating_reason':    analysis.get('rating_reason'),
-        'analyzed_at':      analysis.get('analyzed_at'),
         'db_updated_at':    datetime.now(timezone.utc).isoformat(),
     }
+    # Only include analysis columns when we actually have analysis data.
+    # Omitting them preserves any existing DB analysis state (important on
+    # ephemeral-filesystem restarts where the JSON cache may be gone).
+    if analysis:
+        row.update({
+            'analysis_status':  analysis.get('overall_status'),
+            'analysis_summary': analysis.get('summary'),
+            'analysis_issues':  analysis.get('issues'),
+            'extractor_rating': analysis.get('extractor_rating'),
+            'rating_reason':    analysis.get('rating_reason'),
+            'analyzed_at':      analysis.get('analyzed_at'),
+        })
     # Keep None for explicit null fields, but drop completely missing keys
     return {k: v for k, v in row.items() if k in row}
 
@@ -243,6 +249,23 @@ def _recompute_effective(issues: list, dismissed: list[int]) -> tuple[str | None
     return eff_status, bonus
 
 
+def _ensure_session_in_db(client, session_id: str) -> bool:
+    """
+    If the session isn't in the DB yet, try to upsert it from the JSON cache.
+    Returns True if the session now exists in DB, False otherwise.
+    """
+    try:
+        from app.cache import get_session as cache_get_session
+        cached = cache_get_session(session_id)
+        if cached:
+            upsert_session(cached)
+            logger.info(f"_ensure_session_in_db: upserted {session_id[:8]}… from cache")
+            return True
+    except Exception as e:
+        logger.warning(f"_ensure_session_in_db cache fallback failed [{session_id[:8]}]: {e}")
+    return False
+
+
 def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> dict | None:
     """
     Dismiss (or restore) a single issue by its index in analysis_issues.
@@ -261,6 +284,16 @@ def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> d
             .maybe_single()
             .execute()
         ).data
+        if not row:
+            # Session missing from DB — try to sync from cache then re-fetch
+            _ensure_session_in_db(client, session_id)
+            row = (
+                client.table('sessions')
+                .select('analysis_issues,extractor_rating,dismissed_issues')
+                .eq('session_id', session_id)
+                .maybe_single()
+                .execute()
+            ).data
         if not row:
             return None
 
@@ -317,6 +350,16 @@ def dismiss_all_issues(session_id: str, restore: bool = False) -> dict | None:
             .maybe_single()
             .execute()
         ).data
+        if not row:
+            # Session missing from DB — try to sync from cache then re-fetch
+            _ensure_session_in_db(client, session_id)
+            row = (
+                client.table('sessions')
+                .select('analysis_issues,extractor_rating,dismissed_issues')
+                .eq('session_id', session_id)
+                .maybe_single()
+                .execute()
+            ).data
         if not row:
             return None
 

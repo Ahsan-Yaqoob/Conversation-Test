@@ -148,10 +148,11 @@ from the user conversation into the result JSON, using the available reference d
 === YOUR TASK ===
 Carefully identify REAL errors only. Use the following rules strictly.
 
-⛔ BEFORE YOU WRITE A SINGLE ISSUE, REMEMBER THESE THREE UNBREAKABLE RULES:
+⛔ BEFORE YOU WRITE A SINGLE ISSUE, REMEMBER THESE UNBREAKABLE RULES:
   A) The JSON stores ONLY the LOWEST-PAX room type name. Never flag missing higher-pax room type names.
   B) The JSON stores ONLY the price for the LOWEST-PAX room type. Never flag missing higher-pax room prices — not individually, and NOT bundled under any invented field like `room_prices`, `prices`, or similar.
   C) Never invent a field name. Only flag fields that actually exist (or are truly required) in the result JSON.
+  D) SAME-PAX qty = SUM, never "pick one". If Twin+Double both = 2pax, then qty_2pax = 1+1 = 2. NEVER flag qty_2pax=2 as wrong for "1 Double 1 Twin".
 
 **SYSTEM MESSAGE RULE (critical):**
 - Messages in the conversation that begin with `[SYSTEM]` are **system-injected automated messages**, NOT actual user input.
@@ -180,9 +181,12 @@ Carefully identify REAL errors only. Use the following rules strictly.
 - If a field is null but the user never mentioned it → do NOT flag it
 
 **EXCHANGE RATE RULE:**
-- ONLY flag exchange_rate if the user EXPLICITLY stated a specific exchange rate value in the conversation (e.g. "exchange rate 200", "rate 1.5")
-- If the user did NOT mention exchange rate at all → do NOT flag it, regardless of what value the AI stored (0, 1, null). The system auto-defaults it.
-- If the user DID state a specific rate and the AI stored a different value → flag as wrong_value (low severity)
+- Exchange rate is a SINGLE GLOBAL value for the entire quotation — it is NOT per-service.
+- The user states it ONCE in the conversation (e.g. "exchange rate 200") and the system applies it. It is stored in the first/base service only; it will NOT appear in every service object — this is by design.
+- ONLY flag exchange_rate if the user EXPLICITLY stated a specific numeric exchange rate value in the conversation AND it was stored incorrectly in the first service.
+- If the user did NOT mention exchange rate at all → do NOT flag it in any service, regardless of what value is stored (0, 1, null). The system auto-defaults it.
+- NEVER flag exchange_rate as missing in a secondary service (flight, visa, transfer, etc.) — it is never expected to appear there.
+- If the user DID state a specific rate and the AI stored a different value in the first service → flag as wrong_value (low severity)
 
 **TRANSFER VEHICLE RULE (critical):**
 Each transfer object has a `supplier_mode` field: `"existing"` or `"new"`.
@@ -227,17 +231,15 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 - Only flag `room_type` if it is set to something completely unrelated to what the user mentioned.
 
 **ROOM QUANTITIES for same-pax types (Twin + Double):**
-- When user mentions both Twin and Double (both 2pax), the AI stores only ONE of their counts in `qty_2pax` (not the sum, not the other's count).
-- Accept qty_2pax equal to the count of EITHER Twin OR Double as stated by user — both are valid.
-- Example: user says "1 Double 2 Twin" → qty_2pax=1 OR qty_2pax=2 are BOTH acceptable. Do NOT flag either.
-- Only flag qty_2pax if the value doesn't match any individual count the user stated (e.g. user said "1 Double 2 Twin" but qty_2pax=5 → flag).
+- When user mentions both Twin and Double (both 2pax), the AI stores the SUM of their counts in `qty_2pax`.
+- Example: user says "1 Double 2 Twin" → qty_2pax = 1+2 = 3. Only flag if qty_2pax ≠ 3.
 
 **SAME-PAX COLLAPSING RULE (critical):**
-- This applies to ALL room types, not just Twin/Double. Any two room types that share the same pax capacity from the reference data are treated as the SAME pax slot.
-- When two room types have the same pax capacity, the AI stores ONLY ONE of them (the base room type) and its count in `qty_Xpax`. The other room type is simply ignored in room_quantities — this is correct behaviour.
-- Example: if "Quad"=4pax and "Delux11"=4pax, then "1 Quad 1 Delux11" → `qty_4pax=1` is CORRECT — do NOT flag it as wrong or missing.
-- Do NOT expect qty_Xpax to be the SUM of same-pax rooms. The system stores the count for ONE of them only.
-- Use the REFERENCE DATA to look up each room type's pax capacity. If two room types have the same pax, accept the qty matching either one's individual count as correct.
+- This applies to ALL room types, not just Twin/Double. Any two room types that share the same pax capacity from the reference data are collapsed into ONE `qty_Xpax` entry.
+- When two (or more) room types have the same pax capacity, the AI stores the SUM of all their counts in `qty_Xpax`.
+- Example: if "Quad"=4pax and "Delux11"=4pax, then "1 Quad 1 Delux11" → `qty_4pax = 1+1 = 2` — do NOT flag it as wrong.
+- Example: if "Twin"=2pax and "Double"=2pax, then "2 Twin 3 Double" → `qty_2pax = 2+3 = 5`.
+- Use the REFERENCE DATA to look up each room type's pax capacity. Flag as wrong_value if qty_Xpax ≠ sum of all same-pax room counts.
 
 - Room quantities in the JSON (e.g. qty_2pax, qty_3pax) represent NUMBER OF ROOMS of that pax capacity — do NOT treat them as people counts
 - **DATABASE ROOM TYPE PAX RULE (critical):** Room types are NOT limited to standard names (Single, Double, Twin, Triple, Quad). Types like "Delux", "Premium", "Executive", "Suite", "Penthouse" etc. are real room types in the database and each has its own pax capacity stored in the system (e.g. Delux may be 3pax, Premium may be 7pax). The AI correctly looks up each room type's pax capacity from the database and sets the corresponding `qty_Xpax` field. You CANNOT know the exact pax capacity from the room type name alone. Therefore:
@@ -247,10 +249,14 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 - ROOM QUANTITIES CHECK (for standard types only):
   * Standard pax mapping: Single=1pax, Double=2pax, Twin=2pax, Triple=3pax, Quad=4pax
   * Example: user says "2 Double 3 Triple" (no same-pax collision) → qty_2pax=2, qty_3pax=3
-  * If two room types share the same pax (e.g. Twin+Double, Quad+Delux11), apply SAME-PAX COLLAPSING RULE above instead
-  * If qty count is genuinely wrong with no same-pax explanation → flag as wrong_value (high severity)
+  * If two room types share the same pax (e.g. Twin+Double, Quad+Delux11), apply SAME-PAX COLLAPSING RULE above — qty = SUM of all same-pax room counts
+  * If qty count is genuinely wrong → flag as wrong_value (high severity)
 - Do NOT validate or flag `room_count` — it is auto-calculated by the system
-- Do NOT validate or flag `weekday_price` or `weekend_price` fields on individual rooms — these are auto-calculated by the system, not set by the AI
+- **WEEKDAY / WEEKEND PRICE RULE (critical):**
+  * `weekday_price` and `weekend_price` MUST always hold the price of the BASE room type (lowest pax) — never a higher-pax room type's price.
+  * If the user stated **only one price** for the base room (no separate weekday/weekend distinction), BOTH `weekday_price` AND `weekend_price` must be set to that same value. If they differ → flag as `wrong_value` (high).
+  * If the user stated **two distinct prices** (explicitly "weekday X, weekend Y") → each field takes its respective value.
+  * If the price in `weekday_price` or `weekend_price` belongs to a DIFFERENT (non-base) room type → flag as `wrong_value` (high).
 - **ROOM PRICE RULE (critical):** The system ONLY stores the price for the BASE room type (= the room type with the LOWEST pax capacity). Prices for ALL other room types are NOT stored anywhere in the JSON — not individually, and NOT in any bundled field like `room_prices`. Do NOT flag missing prices for any room type that is NOT the lowest-pax one, regardless of what the user stated or the order they mentioned it. Even if the user stated 3 different prices, only 1 (the lowest-pax room's price) is expected. This is by design.
 - **ROOM TYPE rule:** The AI captures only the BASE room type (LOWEST pax capacity) in `room_type` and `room_type_id`. Order of mention does NOT matter — the system always picks the lowest-pax room type as the base.
   * Example: user says "1 Executive Suite (4pax) 1 Twin (2pax)" → base = Twin (2pax) → `room_type="Twin"`, price = Twin's price → CORRECT. Do NOT flag this.
@@ -299,6 +305,9 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 
 3. **NEVER flag a field that does not exist in the actual result JSON.**
    Only report issues for fields that are actually present in the JSON (with a wrong value) or fields that are genuinely required by the schema but missing. Do not invent field names.
+
+4. **SAME-PAX COLLAPSING: qty_Xpax ALWAYS = SUM of all same-pax room counts — NEVER "pick one".**
+   When multiple room types share the same pax capacity (e.g. Twin=2pax + Double=2pax, or Quad=4pax + Delux11=4pax), the correct `qty_Xpax` value is the SUM of their counts. Example: "1 Double 1 Twin" → `qty_2pax = 2` (NOT 1). Example: "2 Twin 3 Double" → `qty_2pax = 5`. NEVER flag `qty_Xpax = SUM` as wrong. NEVER say "pick one" or "store only one". If the JSON shows `qty_2pax = 2` for "1 Double 1 Twin", that is CORRECT — do NOT flag it.
 
 Return ONLY a valid JSON object — no markdown, no extra text:
 {{
