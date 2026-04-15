@@ -120,13 +120,6 @@ def get_session_db(session_id: str) -> dict | None:
         return None
 
 
-def get_all_sessions_db(
-    limit: int = 25,
-    offset: int = 0,
-    search: str = '',
-    status_filter: str = '',       # 'ok' | 'warning' | 'error' | 'pending' | ''
-    date_filter: str = '',         # 'today' | 'week' | ''
-    session_status: str = '',      # 'completed' | 'active' | ''
 def list_sessions(
     offset: int = 0,
     limit: int = 50,

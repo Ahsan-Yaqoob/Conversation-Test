@@ -182,9 +182,9 @@ async def db_sessions(
     Paginated, filterable session list from Supabase.
     Params: limit, offset, search, status, date (today|week), session_status
     """
-    from app.database import get_all_sessions_db
-    sessions_list, total = get_all_sessions_db(
-        limit=limit, offset=offset,
+    from app.database import list_sessions
+    sessions_list, total = list_sessions(
+        offset=offset, limit=limit,
         search=search, status_filter=status,
         date_filter=date, session_status=session_status,
     )

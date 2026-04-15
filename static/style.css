@@ -30,8 +30,8 @@ body.dark {
   --border2:      #1e293b;
   --text:         #e2e8f0;
   --text2:        #94a3b8;
-  --text3:        #64748b;
-  --text4:        #475569;
+  --text3:        #94a3b8;
+  --text4:        #94a3b8;
   --header-bg:    #0f1e33;
   --header-text:  #e2e8f0;
   --tbl-hover:    #1e3a5f33;
@@ -314,10 +314,13 @@ body.dark .btn-dismiss-selected:hover:not(:disabled) { background: #5b21b6; }
 }
 .time-cell {
   font-size: 11px;
-  color: var(--text4);
+  color: var(--text3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+body.dark .time-cell {
+  color: #94a3b8;
 }
 .issue-cnt    { font-weight: 700; color: var(--text3); text-align: center; }
 .issue-cnt.has-issues { color: #dc2626; }
@@ -356,6 +359,7 @@ body.dark .btn-dismiss-selected:hover:not(:disabled) { background: #5b21b6; }
   color: var(--text4);
   font-size: 14px;
 }
+body.dark .empty-state { color: #94a3b8; }
 
 /* ── Overlay ─────────────────────────────────────────────────────────────── */
 .overlay {
@@ -773,6 +777,7 @@ body.dark .all-good { background: #052e16; border-color: #166534; color: #6ee7b7
 }
 
 .no-data { color: var(--text4); font-size: 13px; text-align: center; padding: 40px; }
+body.dark .no-data { color: #94a3b8; }
 
 /* ── JSON result tab ─────────────────────────────────────────────────────── */
 .json-toolbar {
@@ -948,6 +953,7 @@ body.dark .btn-view:hover { background: #1e40af33; }
 .btn-analyze-lg:disabled { opacity: .6; cursor: not-allowed; }
 
 .no-action { color: var(--text4); font-size: 14px; }
+body.dark .no-action { color: #94a3b8; }
 
 .not-analyzed-box {
   text-align: center;
@@ -1178,9 +1184,16 @@ body.dark .items-per-page-select { background: var(--surface); border-color: var
   transition: color .15s, background .15s;
   opacity: 0;
 }
+body.dark .copy-btn { color: #94a3b8; }
 .tbl-row:hover .copy-btn { opacity: 1; }
 .copy-btn:hover { color: #3b82f6; background: #3b82f612; }
+body.dark .copy-btn:hover { color: #60a5fa; background: #3b82f633; }
 .copy-btn.copied { color: #22c55e; }
+body.dark .copy-btn.copied { color: #4ade80; }
+
+/* ── Message count text ───────────────────────────────────────────────────── */
+.msg-count-text { font-size: 12px; color: var(--text4); }
+body.dark .msg-count-text { color: #94a3b8; }
 
 /* ── Load more bar ──────────────────────────────────────────────────────── */
 .load-more-wrap {
