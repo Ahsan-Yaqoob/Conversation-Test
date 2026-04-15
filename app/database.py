@@ -127,40 +127,61 @@ def get_all_sessions_db(
     status_filter: str = '',       # 'ok' | 'warning' | 'error' | 'pending' | ''
     date_filter: str = '',         # 'today' | 'week' | ''
     session_status: str = '',      # 'completed' | 'active' | ''
+def list_sessions(
+    offset: int = 0,
+    limit: int = 50,
+    search: str = '',
+    status_filter: str = '',
+    session_status: str = '',
+    date_filter: str = '',
 ) -> tuple[list, int]:
     """Returns (sessions_list, total_count) applying filters."""
     client = get_client()
     if not client:
         return [], 0
-    try:
-        cols = (
-            'session_id,status,services,msg_count,scraped_at,session_created_at,'
-            'analysis_status,analysis_summary,analysis_issues,'
-            'extractor_rating,rating_reason,analyzed_at,db_updated_at,dismissed_issues'
-        )
-        q = client.table('sessions').select(cols, count='exact')
+    
+    # Retry logic for transient connection errors
+    max_retries = 2
+    retry_count = 0
+    
+    while retry_count <= max_retries:
+        try:
+            cols = (
+                'session_id,status,services,msg_count,scraped_at,session_created_at,'
+                'analysis_status,analysis_summary,analysis_issues,'
+                'extractor_rating,rating_reason,analyzed_at,db_updated_at,dismissed_issues'
+            )
+            q = client.table('sessions').select(cols, count='exact')
 
-        if search:
-            q = q.ilike('session_id', f'%{search}%')
-        if status_filter == 'pending':
-            q = q.is_('analysis_status', 'null')
-        elif status_filter:
-            q = q.eq('analysis_status', status_filter)
-        if session_status:
-            q = q.ilike('status', session_status)
-        if date_filter == 'today':
-            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-            q = q.gte('session_created_at', today)
-        elif date_filter == 'week':
-            from datetime import timedelta
-            week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            q = q.gte('session_created_at', week_ago)
+            if search:
+                q = q.ilike('session_id', f'%{search}%')
+            if status_filter == 'pending':
+                q = q.is_('analysis_status', 'null')
+            elif status_filter:
+                q = q.eq('analysis_status', status_filter)
+            if session_status:
+                q = q.ilike('status', session_status)
+            if date_filter == 'today':
+                today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                q = q.gte('session_created_at', today)
+            elif date_filter == 'week':
+                from datetime import timedelta
+                week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+                q = q.gte('session_created_at', week_ago)
 
-        result = q.order('session_created_at', desc=True, nullsfirst=False).range(offset, offset + limit - 1).execute()
-        return result.data or [], result.count or 0
-    except Exception as e:
-        logger.error(f"DB list error: {e}")
-        return [], 0
+            result = q.order('session_created_at', desc=True, nullsfirst=False).range(offset, offset + limit - 1).execute()
+            return result.data or [], result.count or 0
+        except Exception as e:
+            retry_count += 1
+            if retry_count <= max_retries:
+                logger.warning(f"DB list error (retry {retry_count}/{max_retries}): {e}")
+                import time
+                time.sleep(0.5)  # Wait before retry
+                continue
+            else:
+                logger.error(f"DB list error (final): {e}")
+                return [], 0
+
 
 
 def get_stats_db() -> dict:
@@ -168,54 +189,83 @@ def get_stats_db() -> dict:
     client = get_client()
     if not client:
         return {}
-    try:
-        from datetime import timedelta
-        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    
+    # Retry logic for transient connection errors
+    max_retries = 2
+    retry_count = 0
+    
+    while retry_count <= max_retries:
+        try:
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+            today = now.strftime('%Y-%m-%d')
+            week_ago = (now - timedelta(days=7)).isoformat()
+            month_ago = (now - timedelta(days=30)).isoformat()
 
-        def _count(**filters):
-            q = client.table('sessions').select('session_id', count='exact')
-            for k, v in filters.items():
-                if k == 'gte_scraped_at':
-                    q = q.gte('session_created_at', v)
-                elif k == 'eq_analysis_status':
-                    q = q.eq('analysis_status', v)
-                elif k == 'null_analysis_status':
-                    q = q.is_('analysis_status', 'null')
-                elif k == 'ilike_status':
-                    q = q.ilike('status', v)
-                elif k == 'eq_status':
-                    q = q.eq('status', v)
-            return q.execute().count or 0
+            def _count(**filters):
+                q = client.table('sessions').select('session_id', count='exact')
+                for k, v in filters.items():
+                    if k == 'gte_scraped_at':
+                        q = q.gte('session_created_at', v)
+                    elif k == 'eq_analysis_status':
+                        q = q.eq('analysis_status', v)
+                    elif k == 'null_analysis_status':
+                        q = q.is_('analysis_status', 'null')
+                    elif k == 'ilike_status':
+                        q = q.ilike('status', v)
+                    elif k == 'eq_status':
+                        q = q.eq('status', v)
+                return q.execute().count or 0
 
-        completed        = _count(ilike_status='completed')
-        ok_completed     = _count(ilike_status='completed', eq_analysis_status='ok')
-        ok_pct           = round(ok_completed / completed * 100) if completed else 0
-        completed_today  = _count(eq_status='completed', gte_scraped_at=today)
-        completed_week   = _count(eq_status='completed', gte_scraped_at=week_ago)
-        today_total      = _count(gte_scraped_at=today)
-        today_ok         = _count(gte_scraped_at=today, eq_analysis_status='ok')
-        today_err        = _count(gte_scraped_at=today, eq_analysis_status='error')
-        today_analyzed   = today_ok + today_err
-        today_pct        = round(today_ok / today_analyzed * 100) if today_analyzed else 0
+            completed        = _count(ilike_status='completed')
+            ok_completed     = _count(ilike_status='completed', eq_analysis_status='ok')
+            ok_pct           = round(ok_completed / completed * 100) if completed else 0
+            completed_today  = _count(eq_status='completed', gte_scraped_at=today)
+            today_total      = _count(gte_scraped_at=today)
+            today_ok         = _count(gte_scraped_at=today, eq_analysis_status='ok')
+            today_err        = _count(gte_scraped_at=today, eq_analysis_status='error')
+            today_analyzed   = today_ok + today_err
+            today_pct        = round(today_ok / today_analyzed * 100) if today_analyzed else 0
+            week_ok          = _count(gte_scraped_at=week_ago, eq_analysis_status='ok')
+            week_err         = _count(gte_scraped_at=week_ago, eq_analysis_status='error')
+            week_analyzed    = week_ok + week_err
+            week_pct         = round(week_ok / week_analyzed * 100) if week_analyzed else 0
+            month_ok         = _count(gte_scraped_at=month_ago, eq_analysis_status='ok')
+            month_err        = _count(gte_scraped_at=month_ago, eq_analysis_status='error')
+            month_analyzed   = month_ok + month_err
+            month_pct        = round(month_ok / month_analyzed * 100) if month_analyzed else 0
 
-        return {
-            'total':           _count(),
-            'today':           today_total,
-            'ok':              _count(eq_analysis_status='ok'),
-            'warning':         _count(eq_analysis_status='warning'),
-            'error':           _count(eq_analysis_status='error'),
-            'pending':         _count(null_analysis_status=True),
-            'completed':       completed,
-            'ok_pct':          ok_pct,
-            'ok_completed':    ok_completed,
-            'completed_today': completed_today,
-            'completed_week':  completed_week,
-            'today_pct':       today_pct,
-        }
-    except Exception as e:
-        logger.error(f"DB stats error: {e}")
-        return {}
+            return {
+                'total':           _count(),
+                'today':           today_total,
+                'ok':              _count(eq_analysis_status='ok'),
+                'warning':         _count(eq_analysis_status='warning'),
+                'error':           _count(eq_analysis_status='error'),
+                'pending':         _count(null_analysis_status=True),
+                'completed':       completed,
+                'ok_pct':          ok_pct,
+                'ok_completed':    ok_completed,
+                'completed_today': completed_today,
+                'today_pct':       today_pct,
+                'today_ok':        today_ok,
+                'today_analyzed':  today_analyzed,
+                'week_pct':        week_pct,
+                'week_ok':         week_ok,
+                'week_analyzed':   week_analyzed,
+                'month_pct':       month_pct,
+                'month_ok':        month_ok,
+                'month_analyzed':  month_analyzed,
+            }
+        except Exception as e:
+            retry_count += 1
+            if retry_count <= max_retries:
+                logger.warning(f"DB stats error (retry {retry_count}/{max_retries}): {e}")
+                import time
+                time.sleep(0.5)
+                continue
+            else:
+                logger.error(f"DB stats error (final): {e}")
+                return {}
 
 
 def _recompute_effective(issues: list, dismissed: list[int]) -> tuple[str | None, int | None]:

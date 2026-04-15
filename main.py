@@ -285,6 +285,23 @@ async def db_session_analysis(session_id: str):
     }
 
 
+@app.post('/api/export-prompts')
+async def export_prompts(request: Request):
+    """Overwrite chat.json in the project root with selected conversation prompts."""
+    payload = await request.json()
+    prompts = payload.get('prompts')
+    if not isinstance(prompts, list):
+        raise HTTPException(status_code=400, detail='prompts must be a list')
+
+    out_file = BASE_DIR / 'chat.json'
+    out_file.write_text(__import__('json').dumps(prompts, indent=2), encoding='utf-8')
+    return {
+        'ok': True,
+        'count': len(prompts),
+        'path': str(out_file),
+    }
+
+
 
 @app.patch('/api/db/sessions/{session_id}/issues/dismiss-all')
 async def dismiss_all_endpoint(session_id: str, restore: bool = False):

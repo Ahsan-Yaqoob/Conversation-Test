@@ -1,0 +1,22 @@
+[
+  {
+    "prompt_id": 1,
+    "description": "Quotation for 8 pax, new custmor Ahmed",
+    "prompt": "Quotation for 8 pax, new custmor Ahmed Raza email ahmed@test.com mob +923115556677 addr Karachi curr SAR bal 0 rate 1 entry debit, per persn. Hotell Anwar Al Madinah M\u00f6venpick checkin 20 Dec 2041 checkout 27 Dec 2041, i want 1 twinn room prce 330 and 1 delux room price 790 and also 1 premum room price 880, meel Suhoor, veiw Kabba View, suplier existing TestFN3."
+  },
+  {
+    "prompt_id": 2,
+    "description": "Quote 7 pax, new customer Ahmed Ali",
+    "prompt": "Quote 7 pax, new customer Ahmed Ali email ahmed@test.com mob +923001234567 addr Lahore curr PKR bal 0 rate 1 entry credit, per person. Hotel Jeddah Marriott Hotel Madinah Road in 10 Aug 2041 out 17 Aug 2041, i need 1 triple room with price 450 and also 1 quad room with price 550, meal Full board, view City view, supplier existing Muhazib Hotel Supplier."
+  },
+  {
+    "prompt_id": 3,
+    "description": "Quote 22 pax, existing agent adil bilal,",
+    "prompt": "Quote 22 pax, existing agent adil bilal, per person. Hotel Anwar Al Madinah M\u00f6venpick in 20 Apr 2041 out 27 Apr 2041, 1 Royal Room room pax 5 price 1100 1 Delux 800 1 Delux6 770 1 Premium 900, meal VIP Dining, view Mosque View, extra bed charge 190, supplier new Shahid Ali email shahid@madinahstays.com mob +966507778899 addr Madinah Saudi Arabia curr SAR bal 0 rate 1 entry debit."
+  },
+  {
+    "prompt_id": 4,
+    "description": "Qt 9 pax new cust Bilal Khan",
+    "prompt": "Qt 9 pax new cust Bilal Khan email bilal@mail.com mob +923004443322 addr ISB curr PKR bal 0 rate 1 entry credit pp. Hotel JMH Jeddah in 10 jan 2042 out 17 jan 2042, need 1 dbl room 360 and 1 dupplex 720 and 1 delux11 710 meal breakfast view towers view sup existing TestFN4."
+  }
+]

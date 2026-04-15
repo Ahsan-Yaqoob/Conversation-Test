@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Quotation Session Analyzer</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=2" />
 </head>
 <body>
 
@@ -51,18 +51,23 @@
       <span class="stat-num" id="sn-today-pct">—</span>
       <div class="okpct-track"><div class="okpct-fill" id="today-pct-bar" style="width:0%"></div></div>
       <span class="stat-lbl">✅ Today OK %</span>
+      <span class="stat-lbl" id="sn-today-pct-sub" style="font-size:10px;margin-top:2px;">— of — analyzed</span>
+    </div>
+    <div class="stat-card week-pct" id="stat-week-pct" onclick="setFilter('date','week')" title="% of this week's analyzed sessions that are OK (ok / ok+error)">
+      <span class="stat-num" id="sn-week-pct">—</span>
+      <div class="okpct-track"><div class="okpct-fill" id="week-pct-bar" style="width:0%"></div></div>
+      <span class="stat-lbl">✅ Weekly OK %</span>
+      <span class="stat-lbl" id="sn-week-pct-sub" style="font-size:10px;margin-top:2px;">— of — analyzed</span>
+    </div>
+    <div class="stat-card month-pct" id="stat-month-pct" title="% of the last 30 days' analyzed sessions that are OK (ok / ok+error)">
+      <span class="stat-num" id="sn-month-pct">—</span>
+      <div class="okpct-track"><div class="okpct-fill" id="month-pct-bar" style="width:0%"></div></div>
+      <span class="stat-lbl">✅ Last 30d OK %</span>
+      <span class="stat-lbl" id="sn-month-pct-sub" style="font-size:10px;margin-top:2px;">— of — analyzed</span>
     </div>
     <div class="stat-card err"  id="stat-err"  onclick="setFilter('status','error')"   title="Has errors">
       <span class="stat-num" id="sn-err">—</span>
       <span class="stat-lbl">❌ Error</span>
-    </div>
-    <div class="stat-card pend" id="stat-pend" onclick="setFilter('status','pending')" title="Not analyzed">
-      <span class="stat-num" id="sn-pend">—</span>
-      <span class="stat-lbl">⏳ Pending</span>
-    </div>
-    <div class="stat-card comp-week" id="stat-comp-week" onclick="setFilter('session','completed_week')" title="Completed sessions in last 7 days">
-      <span class="stat-num" id="sn-comp-week">—</span>
-      <span class="stat-lbl">✅ Done 7d</span>
     </div>
     <div class="stat-card okpct" id="stat-okpct" onclick="setFilter('session','completed')" title="% of completed sessions rated OK by AI">
       <span class="stat-num" id="sn-okpct">—</span>
@@ -73,8 +78,23 @@
 
   <div class="table-card">
     <div class="table-toolbar">
-      <h2>Sessions <span id="sessionCount" class="count-pill">0</span></h2>
+      <h2>Sessions <span id="sessionCount" class="count-pill">0</span>
+        <button id="createJsonBtn" class="btn-create-json" onclick="createSelectedJson()" disabled>Create JSON</button>
+        <button id="dismissSelectedBtn" class="btn-dismiss-selected" onclick="dismissAllSelected()" disabled>✓ Dismiss All Selected</button>
+      </h2>
       <div class="toolbar-right">
+        <!-- Items per page dropdown -->
+        <div class="items-per-page-wrap">
+          <label for="itemsPerPageSelect">Show:</label>
+          <select id="itemsPerPageSelect" class="items-per-page-select" onchange="setItemsPerPage(this.value)">
+            <option value="10">10</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
+            <option value="50" selected>50</option>
+            <option value="80">80</option>
+            <option value="100">100</option>
+          </select>
+        </div>
         <!-- Search -->
         <div class="search-wrap">
           <span class="search-icon">🔍</span>
@@ -97,16 +117,7 @@
     </div>
 
     <!-- table header -->
-    <div class="tbl-head">
-      <span>Session ID</span>
-      <span>Status</span>
-      <span>Services</span>
-      <span>AI Result</span>
-      <span>Issues</span>
-      <span>Summary</span>
-      <span>Created At</span>
-      <span>Action</span>
-    </div>
+    <div class="tbl-head"><span class="sel-col"><input id="selectAllSessions" type="checkbox" onclick="toggleSelectAll(event)" /></span><span>Session ID</span><span>Status</span><span>Services</span><span>AI Result</span><span>Issues</span><span>Summary</span><span>Created At</span><span>Action</span></div>
 
     <div id="sessionRows"></div>
 
@@ -118,6 +129,7 @@
     <div id="loadMoreWrap" class="load-more-wrap" style="display:none;">
       <button id="loadMoreBtn" class="btn-load-more" onclick="loadMore()">Load more</button>
       <span id="loadMoreInfo" class="load-more-info"></span>
+
     </div>
   </div>
 
@@ -183,13 +195,14 @@
   let currentOffset = 0;
   let currentTotal  = 0;
   let hasMore       = false;
-  const PAGE_SIZE   = 25;
+  let PAGE_SIZE   = parseInt(localStorage.getItem('pageSize')) || 25;
+  let selectedSessionIds = new Set();
 
   // Active filters
   let fSearch = '';
   let fStatus = '';        // ok | warning | error | pending | ''
   let fDate   = '';        // today | week | ''
-  let fSessionStatus = ''; // completed | active | completed_today | completed_week | ''
+  let fSessionStatus = ''; // completed | active | completed_today | ''
 
   const SVC_ICONS = { hotel:'🏨', flight:'✈️', visa:'📄', transfer:'🚗' };
   const AI_CFG = {
@@ -198,6 +211,36 @@
     error:   { icon:'❌', cls:'ai-error',   label:'Error' },
     pending: { icon:'⏳', cls:'ai-pending', label:'Pending' },
   };
+
+  // Request queue for dismiss operations (prevent concurrent DB calls)
+  let _dismissQueue = [];
+  let _dismissInProgress = false;
+  let _dismissPromise = Promise.resolve();
+  
+  async function _processDismissQueue() {
+    if (_dismissInProgress || !_dismissQueue.length) return;
+    _dismissInProgress = true;
+    
+    while (_dismissQueue.length) {
+      const request = _dismissQueue.shift();
+      try {
+        await request();
+      } catch (e) {
+        console.error('Queue request error:', e);
+      }
+    }
+    
+    _dismissInProgress = false;
+  }
+  
+  function _queueDismissRequest(fn) {
+    _dismissQueue.push(fn);
+    _processDismissQueue();
+  }
+
+  function panelLoader(text = 'Loading…') {
+    return `<div class="inline-loader-wrap"><div class="inline-loader"></div><div class="inline-loader-text">${esc(text)}</div></div>`;
+  }
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   let _statsInFlight = false;
@@ -210,13 +253,36 @@
       if (d.total     != null) document.getElementById('sn-total').textContent = d.total;
       if (d.today     != null) document.getElementById('sn-today').textContent = d.today;
       if (d.error     != null) document.getElementById('sn-err').textContent   = d.error;
-      if (d.pending   != null) document.getElementById('sn-pend').textContent  = d.pending;
       // Today Done % card
       if (d.today_pct != null) {
         document.getElementById('sn-today-pct').textContent = d.today_pct + '%';
         const tbar = document.getElementById('today-pct-bar');
         tbar.style.width = d.today_pct + '%';
         tbar.style.background = d.today_pct >= 80 ? '#10b981' : d.today_pct >= 50 ? '#f59e0b' : '#ef4444';
+      }
+      if (d.today_ok != null || d.today_analyzed != null) {
+        document.getElementById('sn-today-pct-sub').textContent =
+          `${d.today_ok ?? 0} of ${d.today_analyzed ?? 0} analyzed`;
+      }
+      if (d.week_pct != null) {
+        document.getElementById('sn-week-pct').textContent = d.week_pct + '%';
+        const wbar = document.getElementById('week-pct-bar');
+        wbar.style.width = d.week_pct + '%';
+        wbar.style.background = d.week_pct >= 80 ? '#10b981' : d.week_pct >= 50 ? '#f59e0b' : '#ef4444';
+      }
+      if (d.week_ok != null || d.week_analyzed != null) {
+        document.getElementById('sn-week-pct-sub').textContent =
+          `${d.week_ok ?? 0} of ${d.week_analyzed ?? 0} analyzed`;
+      }
+      if (d.month_pct != null) {
+        document.getElementById('sn-month-pct').textContent = d.month_pct + '%';
+        const mbar = document.getElementById('month-pct-bar');
+        mbar.style.width = d.month_pct + '%';
+        mbar.style.background = d.month_pct >= 80 ? '#10b981' : d.month_pct >= 50 ? '#f59e0b' : '#ef4444';
+      }
+      if (d.month_ok != null || d.month_analyzed != null) {
+        document.getElementById('sn-month-pct-sub').textContent =
+          `${d.month_ok ?? 0} of ${d.month_analyzed ?? 0} analyzed`;
       }
       // Total OK % card
       if (d.ok_pct != null) {
@@ -231,7 +297,6 @@
           `${d.ok_completed ?? 0} of ${d.completed ?? 0} completed`;
       }
       if (d.completed_today != null) document.getElementById('sn-comp-today').textContent = d.completed_today;
-      if (d.completed_week  != null) document.getElementById('sn-comp-week').textContent  = d.completed_week;
     } catch(e) {
       console.warn('Stats fetch failed (keeping previous values):', e);
     } finally {
@@ -273,10 +338,9 @@
   function syncChips() {
     document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active-filter'));
     if (fStatus === 'error')           document.getElementById('stat-err').classList.add('active-filter');
-    if (fStatus === 'pending')         document.getElementById('stat-pend').classList.add('active-filter');
     if (fDate   === 'today' && !fSessionStatus) document.getElementById('stat-today').classList.add('active-filter');
+    if (fDate   === 'week'  && !fSessionStatus) document.getElementById('stat-week-pct').classList.add('active-filter');
     if (fSessionStatus === 'completed_today')   document.getElementById('stat-comp-today').classList.add('active-filter');
-    if (fSessionStatus === 'completed_week')    document.getElementById('stat-comp-week').classList.add('active-filter');
     if (fSessionStatus === 'completed' && !fDate) document.getElementById('stat-okpct') && document.getElementById('stat-okpct').classList.add('active-filter');
     // Sync date chips
     document.querySelectorAll('.filter-chips .chip').forEach(c => {
@@ -295,11 +359,10 @@
     // Non-append always starts from page 1 so auto-refresh shows freshest data
     if (!append) currentOffset = 0;
     try {
-      // compound filters: completed_today / completed_week split into parts
+      // compound filters: completed_today splits into completed + today
       let sendSessionStatus = fSessionStatus;
       let sendDate = fDate;
       if (fSessionStatus === 'completed_today') { sendSessionStatus = 'completed'; sendDate = 'today'; }
-      if (fSessionStatus === 'completed_week')  { sendSessionStatus = 'completed'; sendDate = 'week'; }
       const params = new URLSearchParams({
         limit:          PAGE_SIZE,
         offset:         currentOffset,
@@ -309,6 +372,70 @@
         session_status: sendSessionStatus,
       });
       const d = await fetch(`/api/db/sessions?${params}`).then(r => r.json());
+
+      // Validate response - must have sessions array and total count
+      if (!d || typeof d !== 'object') {
+        console.error('Invalid response format:', d);
+        renderTable(sessions);
+        updateLoadMore();
+        return;
+      }
+
+      // Handle empty valid response
+      if (!Array.isArray(d.sessions)) {
+        console.warn('No sessions array in response:', d);
+        if (!append) {
+          sessions = [];
+          currentTotal = 0;
+          hasMore = false;
+        }
+        renderTable(sessions);
+        updateLoadMore();
+        return;
+      }
+
+      // If got empty result but have active filters, warn and clear filters
+      if (d.sessions.length === 0 && (fSearch || fStatus || fDate || fSessionStatus)) {
+        console.warn('⚠️ Empty result with active filters. Clearing filters...');
+        fSearch = '';
+        fStatus = '';
+        fDate = '';
+        fSessionStatus = '';
+        document.getElementById('searchInput').value = '';
+        document.getElementById('clearSearch').style.display = 'none';
+        syncChips();
+        // Retry without filters
+        currentOffset = 0;
+        const retryParams = new URLSearchParams({
+          limit:          PAGE_SIZE,
+          offset:         0,
+          search:         '',
+          status:         '',
+          date:           '',
+          session_status: '',
+        });
+        const retryD = await fetch(`/api/db/sessions?${retryParams}`).then(r => r.json());
+        if (!retryD || !Array.isArray(retryD.sessions)) {
+          console.error('Retry also failed:', retryD);
+          sessions = [];
+          currentTotal = 0;
+          hasMore = false;
+          renderTable(sessions);
+          updateLoadMore();
+          return;
+        }
+        // Use retry data
+        const normalized = retryD.sessions.map(normRow);
+        sessions = normalized;
+        currentTotal = retryD.total || 0;
+        hasMore = retryD.has_more || false;
+        currentOffset = sessions.length;
+        renderTable(sessions);
+        document.getElementById('sessionCount').textContent = currentTotal;
+        document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        updateLoadMore();
+        return;
+      }
 
       // Normalize DB row → same shape the UI expects
       // Preserve in-memory analysis if DB hasn't synced yet (race guard)
@@ -346,7 +473,12 @@
       document.getElementById('sessionCount').textContent = currentTotal;
       document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
       updateLoadMore();
-    } catch(e) { console.error('Load error', e); }
+    } catch(e) { 
+      console.error('Load error', e);
+      // On error, preserve existing sessions and just update UI
+      renderTable(sessions);
+      updateLoadMore();
+    }
   }
 
   function normRow(s) {
@@ -380,18 +512,30 @@
     };
   }
 
+  let _loadInProgress = false;
+
   async function loadMore() {
+    if (_loadInProgress) return;
+    _loadInProgress = true;
     document.getElementById('loadMoreBtn').textContent = 'Loading…';
     document.getElementById('loadMoreBtn').disabled = true;
-    await loadSessions(true);
-    document.getElementById('loadMoreBtn').textContent = 'Load more';
-    document.getElementById('loadMoreBtn').disabled = false;
+    // Disable dropdown during load to prevent filter changes
+    document.getElementById('itemsPerPageSelect').disabled = true;
+    try {
+      await loadSessions(true);
+    } finally {
+      _loadInProgress = false;
+      document.getElementById('loadMoreBtn').textContent = 'Load more';
+      document.getElementById('loadMoreBtn').disabled = false;
+      document.getElementById('itemsPerPageSelect').disabled = false;
+    }
   }
 
   function updateLoadMore() {
     const wrap = document.getElementById('loadMoreWrap');
     const btn  = document.getElementById('loadMoreBtn');
     const info = document.getElementById('loadMoreInfo');
+    
     if (!sessions.length) {
       wrap.style.display = 'none';
       return;
@@ -407,11 +551,34 @@
     }
   }
 
+  function setItemsPerPage(size) {
+    if (_loadInProgress) {
+      // Prevent changes during load - reset dropdown to current value
+      document.getElementById('itemsPerPageSelect').value = PAGE_SIZE.toString();
+      return;
+    }
+    const sizeNum = parseInt(size);
+    if (PAGE_SIZE === sizeNum) return;
+    PAGE_SIZE = sizeNum;
+    localStorage.setItem('pageSize', sizeNum.toString());
+    currentOffset = 0;
+    sessions = [];
+    loadSessions(false);
+  }
+
   // ── Render table ────────────────────────────────────────────────────────────
   function renderTable(list) {
     const container = document.getElementById('sessionRows');
     const empty     = document.getElementById('emptyState');
-    if (!list.length) { container.innerHTML = ''; empty.style.display = 'flex'; return; }
+    if (!list.length) {
+      console.warn('⚠️ renderTable: empty list (sessions=', sessions.length, ', currentOffset=', currentOffset, ', currentTotal=', currentTotal, ')');
+      container.innerHTML = '';
+      empty.style.display = 'flex';
+      updateCreateJsonBtn();
+      syncSelectAllCheckbox();
+      return;
+    }
+    console.log('✓ renderTable: rendering', list.length, 'sessions');
     empty.style.display = 'none';
 
     container.innerHTML = list.map(s => {
@@ -431,6 +598,7 @@
       const ratingHtml = (rating != null && hasRealAI)
         ? `<span class="rating-pill ${rating>=8?'r-good':rating>=5?'r-mid':'r-low'}">${rating}/10</span>` : '';
       const shortId = s.session_id.slice(0,8) + '…';
+      const checked = selectedSessionIds.has(s.session_id) ? 'checked' : '';
 
       // Determine action button — note: DB sessions may lack conversation, so check hasData carefully
       const hasData = s.conversation_count > 0 || s.msg_count > 0 || s.result_json || (s.conversation && s.conversation.length > 0);
@@ -447,24 +615,233 @@
         actionBtn = `<button class="btn-analyze" id="abtn-${s.session_id}" ${isLocked?'disabled':''} onclick="event.stopPropagation();runAnalyze('${s.session_id}')">${label}</button>`;
       }
 
-      return `
-      <div class="tbl-row" data-sid="${s.session_id}" onclick="openDetail('${s.session_id}')">
-        <span class="sid-wrap">
-          <span class="sid" title="${s.session_id}">${shortId}</span>
-          <button class="copy-btn" title="Copy session ID" onclick="event.stopPropagation();copyId('${s.session_id}',this)">⧉</button>
-        </span>
-        <span><span class="badge ${statusCls}">${s.status||'—'}</span></span>
-        <span class="svc-cell">${services||'—'}</span>
-        <span><span class="ai-badge ${cfg.cls}">${cfg.icon} ${cfg.label}</span>${ratingHtml}</span>
-        <span class="issue-cnt ${activeCount?'has-issues':''}">${activeCount}</span>
-        <span class="summary-cell" title="${esc(summary)}">${esc(summary).slice(0,65)}${summary.length>65?'…':''}</span>
-        <span class="time-cell">${time}</span>
-        <span onclick="event.stopPropagation()">${actionBtn}</span>
-      </div>`;
+      return `<div class="tbl-row" data-sid="${s.session_id}" onclick="openDetail('${s.session_id}')"><span class="sel-col" onclick="event.stopPropagation()"><input type="checkbox" class="row-check" ${checked} onchange="toggleSessionSelection('${s.session_id}', this.checked)" /></span><span class="sid-wrap"><span class="sid" title="${s.session_id}">${shortId}</span><button class="copy-btn" title="Copy session ID" onclick="event.stopPropagation();copyId('${s.session_id}',this)">⧉</button></span><span><span class="badge ${statusCls}">${s.status||'—'}</span></span><span class="svc-cell">${services||'—'}</span><span><span class="ai-badge ${cfg.cls}">${cfg.icon} ${cfg.label}</span>${ratingHtml}</span><span class="issue-cnt ${activeCount?'has-issues':''}">${activeCount}</span><span class="summary-cell" title="${esc(summary)}">${esc(summary).slice(0,65)}${summary.length>65?'…':''}</span><span class="time-cell">${time}</span><span onclick="event.stopPropagation()">${actionBtn}</span></div>`;
     }).join('');
+    updateCreateJsonBtn();
+    syncSelectAllCheckbox();
   }
 
-  // ── Copy session ID ─────────────────────────────────────────────────────────
+  function toggleSessionSelection(sessionId, checked) {
+    if (checked) selectedSessionIds.add(sessionId);
+    else selectedSessionIds.delete(sessionId);
+    updateCreateJsonBtn();
+    syncSelectAllCheckbox();
+  }
+
+  function toggleSelectAll(event) {
+    event.stopPropagation();
+    const checked = event.target.checked;
+    sessions.forEach(s => {
+      if (checked) selectedSessionIds.add(s.session_id);
+      else selectedSessionIds.delete(s.session_id);
+    });
+    renderTable(sessions);
+  }
+
+  function syncSelectAllCheckbox() {
+    const el = document.getElementById('selectAllSessions');
+    if (!el) return;
+    if (!sessions.length) {
+      el.checked = false;
+      el.indeterminate = false;
+      return;
+    }
+    const selectedCount = sessions.filter(s => selectedSessionIds.has(s.session_id)).length;
+    el.checked = selectedCount > 0 && selectedCount === sessions.length;
+    el.indeterminate = selectedCount > 0 && selectedCount < sessions.length;
+  }
+
+  function updateCreateJsonBtn() {
+    const btn = document.getElementById('createJsonBtn');
+    const dismissBtn = document.getElementById('dismissSelectedBtn');
+    if (!btn && !dismissBtn) return;
+    const count = selectedSessionIds.size;
+    if (btn) {
+      btn.disabled = count === 0;
+      btn.textContent = count > 0 ? `Create JSON (${count})` : 'Create JSON';
+    }
+    if (dismissBtn) {
+      dismissBtn.disabled = count === 0;
+      dismissBtn.textContent = count > 0 ? `✓ Dismiss All Selected (${count})` : '✓ Dismiss All Selected';
+    }
+  }
+
+  async function getFullSessionForJson(sessionId) {
+    let session = sessions.find(x => x.session_id === sessionId);
+    if (session && session.conversation) return session;
+    const full = await fetch(`/api/db/sessions/${sessionId}`).then(r => r.json());
+    if (full && full.session_id) {
+      const normalized = normRow(full);
+      const idx = sessions.findIndex(x => x.session_id === sessionId);
+      if (idx >= 0) sessions[idx] = normalized;
+      return normalized;
+    }
+    return session;
+  }
+
+  function buildPromptFromConversation(messages) {
+    if (!Array.isArray(messages) || !messages.length) return '';
+    const userTexts = messages
+      .filter(m => !String(m.role || '').toLowerCase().includes('assistant') && !String(m.role || '').toLowerCase().includes('bot'))
+      .map(m => (m.text || m.content || '').trim())
+      .filter(Boolean)
+      .filter(text => !text.includes('[SYSTEM]'));
+    return userTexts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function buildPromptDescription(prompt) {
+    const words = String(prompt || '').trim().split(/\s+/).filter(Boolean).slice(0, 7);
+    return words.join(' ') || 'Selected chat prompt';
+  }
+
+  async function createSelectedJson() {
+    const btn = document.getElementById('createJsonBtn');
+    const ids = [...selectedSessionIds];
+    if (!ids.length) return;
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="inline-loader inline-loader-sm"></span> Creating…';
+
+    try {
+      const prompts = [];
+      const skipped = [];
+      
+      for (let i = 0; i < ids.length; i += 1) {
+        const sessionId = ids[i];
+        const s = await getFullSessionForJson(sessionId);
+        
+        // Validation: Skip if checked but has no errors (invalid selection)
+        const issues = s?.analysis?.issues || [];
+        const dismissed = s?.dismissed_issues || [];
+        const activeIssues = issues.filter((_, idx) => !dismissed.includes(idx));
+        
+        if (activeIssues.length === 0 && document.querySelector(`input[type="checkbox"][class="row-check"]:checked`)?.closest('.tbl-row')?.dataset.sid === sessionId) {
+          skipped.push(sessionId.slice(0, 8));
+          // Uncheck this row
+          const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input[class="row-check"]`);
+          if (checkbox) checkbox.checked = false;
+          continue;
+        }
+        
+        const prompt = buildPromptFromConversation(s?.conversation || []);
+        let description = buildPromptDescription(prompt);
+        
+        // Add dismissed message if there are dismissed issues
+        if (dismissed.length > 0) {
+          description += ` | ${dismissed.length} issue${dismissed.length > 1 ? 's' : ''} dismissed`;
+        }
+        
+        prompts.push({
+          prompt_id: i + 1,
+          description,
+          prompt,
+        });
+      }
+
+      const res = await fetch('/api/export-prompts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompts }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      
+      let msg = `Saved ${data.count} prompt${data.count !== 1 ? 's' : ''} to chat.json`;
+      if (skipped.length > 0) {
+        msg += `\n\n⚠️ Skipped ${skipped.length} row${skipped.length > 1 ? 's' : ''} with no errors checked: ${skipped.join(', ')}`;
+      }
+      alert(msg);
+    } catch (e) {
+      console.error('createSelectedJson error', e);
+      alert('Failed to create JSON: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      updateCreateJsonBtn();
+    }
+  }
+
+  async function dismissAllSelected() {
+    const btn = document.getElementById('dismissSelectedBtn');
+    const ids = [...selectedSessionIds];
+    if (!ids.length) return;
+
+    const confirmed = confirm(`Dismiss all errors for ${ids.length} selected session${ids.length > 1 ? 's' : ''}?`);
+    if (!confirmed) return;
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    
+    let successCount = 0;
+    let failCount = 0;
+    const errors = [];
+    const successIds = [];
+
+    try {
+      // Queue all requests sequentially with real-time progress
+      for (let i = 0; i < ids.length; i += 1) {
+        const sessionId = ids[i];
+        const progress = `${i + 1}/${ids.length}`;
+        
+        // Update button with live progress
+        btn.innerHTML = `<span class="inline-loader inline-loader-sm"></span> Dismissing ${progress}…`;
+        
+        // Queue this request to ensure sequential DB access
+        await new Promise((resolve) => {
+          _queueDismissRequest(async () => {
+            try {
+              const res = await fetch(`/api/db/sessions/${sessionId}/issues/dismiss-all`, { method: 'PATCH' });
+              if (!res.ok) throw new Error(await res.text());
+              const data = await res.json();
+
+              const s = sessions.find(x => x.session_id === sessionId);
+              if (s) {
+                s.dismissed_issues = data.dismissed_issues;
+                s.analysis_status = data.analysis_status;
+                s.effective_rating = data.effective_rating;
+                if (s.analysis) s.analysis.overall_status = data.analysis_status;
+              }
+
+              successCount++;
+              successIds.push(sessionId);
+              
+              // Uncheck immediately after success
+              selectedSessionIds.delete(sessionId);
+              const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input[class="row-check"]`);
+              if (checkbox) checkbox.checked = false;
+              
+            } catch (e) {
+              failCount++;
+              errors.push(`${sessionId.slice(0, 8)}: ${e.message}`);
+            } finally {
+              resolve();
+            }
+          });
+        });
+      }
+
+      // Re-render table
+      renderTable(sessions);
+      loadStats();
+
+      let msg = `✅ Dismissed errors for ${successCount} session${successCount !== 1 ? 's' : ''}`;
+      if (failCount > 0) {
+        msg += `\n\n❌ Failed for ${failCount} session${failCount !== 1 ? 's' : ''}:\n${errors.join('\n')}\nThese remain checked for retry.`;
+      }
+      alert(msg);
+
+      // Update button state
+      updateCreateJsonBtn();
+      syncSelectAllCheckbox();
+    } catch (e) {
+      console.error('dismissAllSelected error', e);
+      alert('Error dismissing selected: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
   function copyId(id, btn) {
     navigator.clipboard.writeText(id).then(() => {
       const orig = btn.textContent;
@@ -562,6 +939,8 @@
   function startPolling() {
     if (polling) clearInterval(polling);
     polling = setInterval(async () => {
+      // Skip polling if we're in the middle of a "Load more" operation
+      if (_loadInProgress) return;
       await loadSessions(false);
       const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
       syncAnalyzingIds(d.analyzing || []);
@@ -609,9 +988,9 @@
     if (s && !s.conversation && !s.result_json) {
       // Show panel immediately with a loading state while we fetch
       document.getElementById('dpSessionId').textContent = sessionId;
-      document.getElementById('tabConversation').innerHTML = '<p class="no-data">Loading…</p>';
-      document.getElementById('tabResultJson').innerHTML  = '<p class="no-data">Loading…</p>';
-      document.getElementById('tabRefData').innerHTML     = '<p class="no-data">Loading…</p>';
+      document.getElementById('tabConversation').innerHTML = panelLoader('Loading conversation…');
+      document.getElementById('tabResultJson').innerHTML  = panelLoader('Loading result JSON…');
+      document.getElementById('tabRefData').innerHTML     = panelLoader('Loading reference data…');
       document.getElementById('tabAnalysis').innerHTML    = buildAnalysis(s);
       document.querySelectorAll('.dtab').forEach(t => t.classList.remove('active'));
       document.querySelector('.dtab[data-tab="analysis"]').classList.add('active');
@@ -706,7 +1085,12 @@
       ? 'All issues dismissed — extraction accepted as correct.'
       : (analysis.summary || 'No summary.');
 
+    const analysisSearchId = 'analysis-search-' + Math.random().toString(36).slice(2);
     let html = `
+    <div class="tab-toolbar">
+      <input class="tab-search" type="text" placeholder="🔍 Search in analysis…" oninput="filterAnalysis('${analysisSearchId}', this.value)">
+    </div>
+    <div id="${analysisSearchId}" class="analysis-search-body">
     <div class="summary-box ${cfg.cls}">
       <span class="summary-icon">${cfg.icon}</span>
       <div><strong>Overall: ${cfg.label}</strong><p>${esc(displaySummary)}</p></div>
@@ -743,6 +1127,10 @@
     if (issues.length) {
       const activeCount = issues.filter((_, i) => !dismissedArr.includes(i)).length;
       const dimCount    = issues.length - activeCount;
+      const issuesId = 'issues-' + Math.random().toString(36).slice(2);
+      
+      // Store issues in window for copy function
+      window[issuesId] = issues;
 
       html += `<div class="issues-heading-row">
         <h4 class="issues-heading">Issues Found
@@ -753,8 +1141,10 @@
           ${activeCount > 0 ? `<button class="btn-dismiss-all" onclick="dismissAllIssues('${s.session_id}', false)">✓ Dismiss All</button>` : ''}
           ${dimCount > 0 ? `<button class="btn-restore-all" onclick="dismissAllIssues('${s.session_id}', true)">↩ Restore All</button>` : ''}
           ${dimCount ? `<button class="btn-show-dismissed" onclick="toggleDismissed(this)">Show dismissed</button>` : ''}
+          <button class="btn-copy" title="Copy all issues" onclick="copyIssues('${issuesId}', this)">📋 Copy</button>
         </div>
-      </div>`;
+      </div>
+      <div id="${issuesId}" style="display:none;"></div>`;
 
       html += issues.map((issue, idx) => {
         const isDismissed = dismissedArr.includes(idx);
@@ -780,81 +1170,110 @@
     } else {
       html += `<div class="all-good">✅ All data correctly captured — no issues found!</div>`;
     }
+    html += `</div>`;
     return html;
   }
 
   async function dismissIssue(sessionId, idx, isCurrentlyDismissed) {
     const cardId = `issue-${sessionId.slice(0,8)}-${idx}`;
     const card = document.getElementById(cardId);
-    if (card) card.style.opacity = '0.5';
+    const btn = card ? card.querySelector('.btn-dismiss-issue') : null;
+    const originalBtnText = btn ? btn.textContent : '';
+    
+    // Queue the request to prevent concurrent DB calls
+    _queueDismissRequest(async () => {
+      if (card) card.style.opacity = '0.5';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="inline-loader inline-loader-sm"></span>';
+      }
 
-    try {
-      const url = `/api/db/sessions/${sessionId}/issues/${idx}${isCurrentlyDismissed ? '?restore=true' : ''}`;
-      const res = await fetch(url, { method: 'PATCH' });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      try {
+        const url = `/api/db/sessions/${sessionId}/issues/${idx}${isCurrentlyDismissed ? '?restore=true' : ''}`;
+        const res = await fetch(url, { method: 'PATCH' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
 
-      // Update local session cache — keep original extractor_rating intact
-      const s = sessions.find(x => x.session_id === sessionId);
-      if (s) {
-        s.dismissed_issues = data.dismissed_issues;
-        s.analysis_status  = data.analysis_status;
-        // Store effective_rating separately; extractor_rating stays as original AI value
-        s.effective_rating = data.effective_rating;
-        if (s.analysis) {
-          s.analysis.overall_status = data.analysis_status;
+        // Update local session cache — keep original extractor_rating intact
+        const s = sessions.find(x => x.session_id === sessionId);
+        if (s) {
+          s.dismissed_issues = data.dismissed_issues;
+          s.analysis_status  = data.analysis_status;
+          // Store effective_rating separately; extractor_rating stays as original AI value
+          s.effective_rating = data.effective_rating;
+          if (s.analysis) {
+            s.analysis.overall_status = data.analysis_status;
+          }
         }
-      }
 
-      // Re-render analysis tab
-      const panelId = document.getElementById('dpSessionId').textContent;
-      if (panelId === sessionId) {
-        const target = sessions.find(x => x.session_id === sessionId);
-        if (target) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(target);
-      }
+        // Re-render analysis tab
+        const panelId = document.getElementById('dpSessionId').textContent;
+        if (panelId === sessionId) {
+          const target = sessions.find(x => x.session_id === sessionId);
+          if (target) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(target);
+        }
 
-      // Re-render table row badge + issue count + rating
-      renderTableRow(sessionId);
-      loadStats();
-    } catch(e) {
-      console.error('dismissIssue error', e);
-      if (card) card.style.opacity = '';
-      alert('Failed to update issue: ' + e.message);
-    }
+        // Re-render table row badge + issue count + rating
+        renderTableRow(sessionId);
+        loadStats();
+      } catch(e) {
+        console.error('dismissIssue error', e);
+        if (card) card.style.opacity = '';
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = originalBtnText;
+        }
+        alert('Failed to update issue: ' + e.message);
+      }
+    });
   }
 
   async function dismissAllIssues(sessionId, restore) {
     const tabEl = document.getElementById('tabAnalysis');
-    if (tabEl) tabEl.style.opacity = '0.6';
-
-    try {
-      const url = `/api/db/sessions/${sessionId}/issues/dismiss-all${restore ? '?restore=true' : ''}`;
-      const res = await fetch(url, { method: 'PATCH' });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-
-      const s = sessions.find(x => x.session_id === sessionId);
-      if (s) {
-        s.dismissed_issues = data.dismissed_issues;
-        s.analysis_status  = data.analysis_status;
-        s.effective_rating = data.effective_rating;
-        if (s.analysis) s.analysis.overall_status = data.analysis_status;
+    const btn = event.target;
+    const originalBtnText = btn ? btn.textContent : '';
+    
+    // Queue the request to prevent concurrent DB calls
+    _queueDismissRequest(async () => {
+      if (tabEl) tabEl.style.opacity = '0.6';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="inline-loader inline-loader-sm"></span>';
       }
 
-      const panelId = document.getElementById('dpSessionId').textContent;
-      if (panelId === sessionId) {
-        const target = sessions.find(x => x.session_id === sessionId);
-        if (target) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(target);
-      }
+      try {
+        const url = `/api/db/sessions/${sessionId}/issues/dismiss-all${restore ? '?restore=true' : ''}`;
+        const res = await fetch(url, { method: 'PATCH' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
 
-      renderTableRow(sessionId);
-      loadStats();
-    } catch(e) {
-      console.error('dismissAll error', e);
-      alert('Failed to dismiss all: ' + e.message);
-    } finally {
-      if (tabEl) tabEl.style.opacity = '';
-    }
+        const s = sessions.find(x => x.session_id === sessionId);
+        if (s) {
+          s.dismissed_issues = data.dismissed_issues;
+          s.analysis_status  = data.analysis_status;
+          s.effective_rating = data.effective_rating;
+          if (s.analysis) s.analysis.overall_status = data.analysis_status;
+        }
+
+        const panelId = document.getElementById('dpSessionId').textContent;
+        if (panelId === sessionId) {
+          const target = sessions.find(x => x.session_id === sessionId);
+          if (target) document.getElementById('tabAnalysis').innerHTML = buildAnalysis(target);
+        }
+
+        renderTableRow(sessionId);
+        loadStats();
+      } catch(e) {
+        console.error('dismissAll error', e);
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = originalBtnText;
+        }
+        alert('Failed to dismiss all: ' + e.message);
+      } finally {
+        if (tabEl) tabEl.style.opacity = '';
+      }
+    });
   }
 
   function toggleDismissed(btn) {
@@ -908,9 +1327,12 @@
       return `[${role}]: ${m.text || m.content || ''}`;
     }).join('\n\n');
     const cid = 'conv-' + Math.random().toString(36).slice(2);
+    // Store in window object for copy function to access
+    window[cid] = allText;
     let html = `<div class="conv-toolbar">
+      <input class="tab-search" type="text" placeholder="🔍 Search in conversation…" oninput="filterConversation('${cid}', this.value)">
       <span style="font-size:12px;color:var(--text4);">${messages.length} messages</span>
-      <button class="btn-copy" onclick="copyConv('${cid}')">📋 Copy All</button>
+      <button class="btn-copy" onclick="copyConv('${cid}', this)">📋 Copy All</button>
     </div>
     <div id="${cid}" class="conv-wrap">`;
     html += messages.map((m) => {
@@ -928,17 +1350,28 @@
       </div>`;
     }).join('');
     html += `</div>`;
-    // Store full text for copy-all
-    html += `<script>window['${cid}_text'] = ${JSON.stringify(allText)};<\/script>`;
     return html;
   }
 
-  function copyConv(cid) {
-    const text = window[cid + '_text'] || '';
+  function filterConversation(cid, query) {
+    const wrap = document.getElementById(cid);
+    if (!wrap) return;
+    const q = String(query || '').toLowerCase().trim();
+    wrap.querySelectorAll('.msg').forEach(msg => {
+      msg.style.display = !q || msg.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  }
+
+  function copyConv(cid, btn) {
+    const text = window[cid] || '';
+    if (!text) { alert('No text to copy'); return; }
     navigator.clipboard.writeText(text).then(() => {
-      document.querySelectorAll(`[onclick*="copyConv('${cid}')"]`).forEach(b => {
-        b.textContent = '✅ Copied!'; setTimeout(() => b.textContent = '📋 Copy All', 1500);
-      });
+      btn.textContent = '✅ Copied!'; 
+      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
+    }).catch(err => {
+      console.error('Copy failed:', err);
+      btn.textContent = '❌ Failed'; 
+      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
     });
   }
 
@@ -948,14 +1381,14 @@
     }
     const str = JSON.stringify(json, null, 2);
     const id = 'rjson-' + Math.random().toString(36).slice(2);
-    // Store raw string in data attribute so copyJson reads it without HTML-decode issues
+    window[id] = str;
     return `
     <div class="json-toolbar">
+      <input class="tab-search" type="text" placeholder="🔍 Search in result JSON…" oninput="filterJson('${id}', this.value)">
       <span style="font-size:12px;color:var(--text4);">${Object.keys(json).length} top-level keys</span>
-      <button class="btn-copy" id="copybtn-${id}" onclick="copyJson('${id}')">📋 Copy</button>
+      <button class="btn-copy" id="copybtn-${id}" onclick="copyJson('${id}', this)" data-json="${esc(str)}">📋 Copy All</button>
     </div>
-    <pre id="${id}" class="json-pre" data-raw="">${esc(str)}</pre>
-    <script>document.getElementById('${id}').dataset.raw = ${JSON.stringify(str)};<\/script>`;
+    <pre id="${id}" class="json-pre">${esc(str)}</pre>`;
   }
 
   function buildReferenceData(refData) {
@@ -974,9 +1407,8 @@
     const rid = 'rd-' + Math.random().toString(36).slice(2);
     let html = `
     <div class="rd-toolbar">
-      <input class="rd-search" type="text" placeholder="🔍 Search in reference data…"
-             oninput="filterRefData(this,'${rid}')">
-      <button class="btn-copy" onclick="copyRefData('${rid}')">📋 Copy All</button>
+      <input class="rd-search" type="text" placeholder="🔍 Search in reference data…" data-rid="${rid}">
+      <button class="btn-copy" onclick="copyRefData('${rid}', this)">📋 Copy All</button>
     </div>
     <div id="${rid}" class="rd-body">`;
 
@@ -1010,6 +1442,15 @@
     }
 
     html += `</div>`;
+    
+    // Defer attaching the event listener until after innerHTML is set
+    setTimeout(() => {
+      const searchInput = document.querySelector(`.rd-search[data-rid="${rid}"]`);
+      if (searchInput) {
+        searchInput.addEventListener('input', function() { filterRefData(this, rid); });
+      }
+    }, 0);
+    
     return html;
   }
 
@@ -1036,15 +1477,69 @@
   }
 
   function filterRefData(input, rid) {
-    const q = input.value.toLowerCase();
-    document.querySelectorAll(`#${rid} .rd-section`).forEach(sec => {
+    const q = input.value.toLowerCase().trim();
+    const body = document.getElementById(rid);
+    if (!body) return;
+    
+    // Reset all highlighting
+    body.querySelectorAll('.rd-highlight').forEach(el => {
+      el.classList.remove('rd-highlight');
+      el.textContent = el.dataset.original || el.textContent;
+    });
+    
+    if (!q) {
+      // Show all sections and rows
+      body.querySelectorAll('.rd-section').forEach(s => s.style.display = '');
+      body.querySelectorAll('tr').forEach(r => r.style.display = '');
+      return;
+    }
+    
+    // Hide all sections first
+    body.querySelectorAll('.rd-section').forEach(s => s.style.display = 'none');
+    body.querySelectorAll('tr').forEach(r => r.style.display = 'none');
+    
+    // Show sections that match the label
+    body.querySelectorAll('.rd-section').forEach(sec => {
       const label = sec.dataset.label || '';
-      const text  = sec.textContent.toLowerCase();
-      sec.style.display = (!q || label.includes(q) || text.includes(q)) ? '' : 'none';
+      if (label.includes(q)) {
+        sec.style.display = '';
+        sec.querySelectorAll('tr').forEach(r => r.style.display = '');
+      }
+    });
+    
+    // Highlight and show matching rows in visible sections
+    body.querySelectorAll('tr').forEach(row => {
+      let rowMatches = false;
+      row.querySelectorAll('td').forEach(cell => {
+        const text = cell.textContent.toLowerCase();
+        if (text.includes(q)) {
+          rowMatches = true;
+          // Highlight matching cell
+          cell.classList.add('rd-highlight');
+          cell.style.backgroundColor = 'rgba(255,193,7,.3)';
+        }
+      });
+      if (rowMatches) {
+        row.style.display = '';
+        // Make section visible
+        let sec = row.closest('.rd-section');
+        if (sec) sec.style.display = '';
+      }
+    });
+    
+    // Also highlight in text tags
+    body.querySelectorAll('.rd-tag').forEach(tag => {
+      const text = tag.textContent.toLowerCase();
+      if (text.includes(q)) {
+        tag.classList.add('rd-highlight');
+        tag.style.backgroundColor = 'rgba(255,193,7,.3)';
+        let sec = tag.closest('.rd-section');
+        if (sec) sec.style.display = '';
+      }
     });
   }
 
-  function copyRefData(rid) {
+  function copyRefData(rid, btn) {
     const el = document.getElementById(rid);
     if (!el) return;
     // Collect text from each section
@@ -1059,19 +1554,24 @@
       lines.push('');
     });
     navigator.clipboard.writeText(lines.join('\n')).then(() => {
-      const btns = document.querySelectorAll(`[onclick="copyRefData('${rid}')"]`);
-      btns.forEach(b => { b.textContent = '✅ Copied!'; setTimeout(() => b.textContent = '📋 Copy All', 1500); });
+      btn.textContent = '✅ Copied!';
+      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
     });
   }
 
-  function copyJson(id) {
+  function filterJson(id, query) {
     const el = document.getElementById(id);
+    const raw = window[id] || '';
     if (!el) return;
-    // Use stored raw string from dataset (avoids HTML-entity decode issues)
-    const text = el.dataset.raw || el.textContent;
-    const btn  = document.getElementById('copybtn-' + id);
+    const q = String(query || '').toLowerCase().trim();
+    el.textContent = !q ? raw : (raw.split('\n').filter(line => line.toLowerCase().includes(q)).join('\n') || 'No matching JSON lines.');
+  }
+
+  function copyJson(id, btn) {
+    const text = btn.getAttribute('data-json') || '';
     navigator.clipboard.writeText(text).then(() => {
-      if (btn) { btn.textContent = '✅ Copied!'; setTimeout(() => btn.textContent = '📋 Copy', 1500); }
+      btn.textContent = '✅ Copied!'; 
+      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
     }).catch(() => {
       // Fallback for non-HTTPS or blocked clipboard
       const ta = document.createElement('textarea');
@@ -1079,7 +1579,36 @@
       document.body.appendChild(ta); ta.select();
       document.execCommand('copy');
       document.body.removeChild(ta);
-      if (btn) { btn.textContent = '✅ Copied!'; setTimeout(() => btn.textContent = '📋 Copy', 1500); }
+      btn.textContent = '✅ Copied!'; 
+      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
+    });
+  }
+
+  function copyIssues(issuesId, btn) {
+    const issues = window[issuesId] || [];
+    if (!issues.length) { alert('No issues to copy'); return; }
+    
+    const lines = issues.map(issue => 
+      `[${issue.type||'issue'}] ${issue.severity||'medium'}\nField: ${issue.field||'—'}\n${issue.description||''}\nExpected: ${issue.expected||'—'}\nActual: ${String(issue.actual||'—')}`
+    );
+    const text = lines.join('\n---\n');
+    
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = '✅ Copied!'; 
+      setTimeout(() => btn.textContent = '📋 Copy', 1500);
+    }).catch(err => {
+      console.error('Copy failed:', err);
+      btn.textContent = '❌ Failed'; 
+      setTimeout(() => btn.textContent = '📋 Copy', 1500);
+    });
+  }
+
+  function filterAnalysis(containerId, query) {
+    const root = document.getElementById(containerId);
+    if (!root) return;
+    const q = String(query || '').toLowerCase().trim();
+    root.querySelectorAll('.summary-box, .rating-box, .alert-box, .all-good, .issue-card').forEach(el => {
+      el.style.display = !q || el.textContent.toLowerCase().includes(q) ? '' : 'none';
     });
   }
 

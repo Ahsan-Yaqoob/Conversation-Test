@@ -214,11 +214,30 @@ Each transfer object has a `supplier_mode` field: `"existing"` or `"new"`.
 
 **PER-PERSON vs PER-SERVICE CALCULATION RULE (critical):**
 - Check the `calculation_type` field in the result JSON (e.g. `"per_person"` or `"per_service"`).
+- **If `calculation_type = "per_service"`:** Each hotel is independent. Validate each hotel's room fields against what the user explicitly stated for that specific hotel.
+
+[COMMENTED OUT - NOT IN USE]
+/*
 - **If `calculation_type = "per_person"`:** The system automatically copies room_type, room_type_id, room_quantities, extra_beds, and all room-related fields from `hotels[0]` to ALL subsequent hotels (hotels[1], hotels[2], etc.). This is correct system behaviour — the same room configuration applies to all hotels.
   * Do NOT validate room_quantities, room_type, extra_beds, or any room fields for hotels[1] and beyond against what the user said for those hotels.
   * Do NOT flag hotels[1+] room data even if it differs from what the user specified for that specific hotel — it is always a copy of hotels[0].
   * Only validate room-related fields for `hotels[0]` when calculation_type is per_person.
-- **If `calculation_type = "per_service"`:** Each hotel is independent. Validate each hotel's room fields against what the user explicitly stated for that specific hotel.
+*/
+
+**NEW RULE - PER-PERSON HOTEL COMPARISON (critical):**
+- **If `calculation_type = "per_person"`:** The system copies room configurations from `hotels[0]` to subsequent hotels. Instead of just accepting this blindly:
+  * Extract what the USER explicitly specified for each hotel (hotels[1], hotels[2], etc.) from the conversation
+  * Compare what the AI extracted for that hotel against what the user said
+  * Flag as `wrong_value` if there's a mismatch between user input and AI extraction for:
+    - Room type
+    - Room view / category
+    - Meal type
+    - Extra beds count and charge
+    - Room quantities (qty_Xpax)
+  * Example: User says "Hotel 2: Double room with half-board, seaview, 2 extra beds"
+    → Check if AI captured: Double room type, half-board meal, seaview view, 2 extra beds
+    → If any differ, flag the mismatch (high severity)
+  * Do NOT flag if AI correctly captured what user said, even if it differs from Hotel 1
 
 **PAX-SIZE DESCRIPTOR RULE (critical — read before checking room type or quantities):**
 The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
