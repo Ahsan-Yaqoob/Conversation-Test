@@ -195,14 +195,15 @@ Each transfer object has a `supplier_mode` field: `"existing"` or `"new"`.
   * **NEVER flag** `luggage`, `transmission`, `pax_capacity`, `passengers_capacity`, `luggage_capacity` as missing for existing-mode transfers — this is correct behaviour.
 
 - `supplier_mode = "new"`: The user is defining a brand-new vehicle. Specs belong inside `new_vehicle_category` object:
-  * `passengers_capacity` → user's stated pax count
-  * `luggage_capacity` → user's stated luggage count
-  * `value` → vehicle category name (e.g. "Bus")
-  * **Only flag a spec as missing_field** when ALL THREE conditions are true:
-    1. `supplier_mode = "new"`
-    2. The user explicitly stated that value in conversation (e.g. "pax 40", "luggage 2", "transmission Manual")
-    3. The field is absent or null inside `new_vehicle_category`
-  * If the user did NOT mention the value, do NOT flag it regardless of what is in the JSON.
+   * `passengers_capacity` → user's stated pax count
+   * `luggage_capacity` → user's stated luggage count
+   * `value` → vehicle category name (e.g. "Bus")
+   * If the user only stated pax/luggage/name for `new_vehicle_name`, do NOT treat that as a missing value for `new_vehicle_category`
+   * **Only flag a spec as missing_field** when ALL THREE conditions are true:
+     1. `supplier_mode = "new"`
+     2. The user explicitly stated that value for the vehicle category in conversation (e.g. "pax 40", "luggage 2", "transmission Manual")
+     3. The field is absent or null inside `new_vehicle_category`
+   * If the user did NOT mention the value for the category, do NOT flag it regardless of what is in the JSON.
 
 **HOTEL COUNT RULE (critical):**
 - Count how many DISTINCT hotels the user mentioned (distinct = different hotel name OR different city OR different check-in/check-out dates)
@@ -291,6 +292,14 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 - If the value exists in ANY of those fields (even if `room_type` itself is empty), do NOT flag it — the value has been captured correctly.
 - Do NOT flag an empty `room_type` field if the custom name appears in `new_room_type` or another variant field.
 - Do NOT apply this rule to the 2nd, 3rd, or any additional room type mentioned by the user — their names are simply not stored by design.
+
+**CUSTOM / NEW VALUE RULE (critical):**
+- This applies to any service field that can have a custom/new value, such as hotel meal type, flight class/type, visa type, transfer type, or similar.
+- If the user explicitly gives a value that is not in the reference data, the AI may store it in an alternate `new_*` or custom field instead of the primary field.
+- Do NOT flag the primary field as wrong or missing if the same value is correctly captured in the matching `new_*` / custom field.
+- Only flag `missing_field` or `wrong_value` when the value is absent from BOTH the primary field and the related `new_*` / custom field for that item.
+- In short: if the custom value exists anywhere in its own capture path, it is correct and should not be flagged just because it is not in the main field.
+
 - **NEW ROOM TYPE POSITION RULE (critical):**
   * The frontend form enforces: a custom/new room type (not in the reference data) can ONLY be used as a secondary (non-base) room type if its pax capacity is GREATER than the base room type's pax.
   * If the custom/new room type has LOWER pax than the defined base room type → the custom type MUST be the base, not secondary.

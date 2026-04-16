@@ -81,6 +81,8 @@
       <h2>Sessions <span id="sessionCount" class="count-pill">0</span>
         <button id="createJsonBtn" class="btn-create-json" onclick="createSelectedJson()" disabled>Create JSON</button>
         <button id="dismissSelectedBtn" class="btn-dismiss-selected" onclick="dismissAllSelected()" disabled>✓ Dismiss All Selected</button>
+        <button id="downloadSelectedBtn" class="btn-download-json" onclick="downloadSelectedJson()" disabled>⬇ Download JSON</button>
+        <button id="downloadPromptsBtn" class="btn-download-prompts" onclick="downloadSelectedPromptsJson()" disabled>⬇ Download Prompts</button>
       </h2>
       <div class="toolbar-right">
         <!-- Items per page dropdown -->
@@ -94,6 +96,8 @@
             <option value="80">80</option>
             <option value="100">100</option>
           </select>
+          <input id="itemsPerPageCustom" class="items-per-page-custom" type="number" min="1" step="1" placeholder="Custom" onkeydown="handleItemsPerPageCustomKey(event)" />
+          <button id="itemsPerPageApply" type="button" class="items-per-page-apply" onclick="applyCustomItemsPerPage()">Apply</button>
         </div>
         <!-- Search -->
         <div class="search-wrap">
@@ -106,12 +110,6 @@
           <button class="chip active" data-filter="" onclick="setDateChip(this,'')">All time</button>
           <button class="chip" data-filter="today" onclick="setDateChip(this,'today')">Today</button>
           <button class="chip" data-filter="week"  onclick="setDateChip(this,'week')">7 days</button>
-        </div>
-        <div class="legend">
-          <span class="leg ok">✅ OK</span>
-          <span class="leg warning">⚠️ Warning</span>
-          <span class="leg error">❌ Error</span>
-          <span class="leg pending">⏳ Pending</span>
         </div>
       </div>
     </div>
@@ -144,10 +142,8 @@
       <div class="dp-label">Session</div>
       <div style="display:flex;align-items:center;gap:6px;">
         <div id="dpSessionId" class="dp-session-id"></div>
-        <button class="copy-sid-btn" title="Copy session ID" onclick="
-          const sid=document.getElementById('dpSessionId').textContent;
-          navigator.clipboard.writeText(sid).then(()=>{this.textContent='✅';setTimeout(()=>this.textContent='⧉',1400)});
-        ">⧉</button>
+        <button class="copy-sid-btn" title="Copy session ID" onclick="copyWithButton(document.getElementById('dpSessionId').textContent, this, '⧉')">⧉</button>
+        <button class="copy-sid-btn" title="Copy all data" onclick="copyCurrentDetailBundle(this)">Copy All Data</button>
       </div>
     </div>
     <button class="dp-close" onclick="closeDetail()">✕</button>
@@ -197,6 +193,7 @@
   let hasMore       = false;
   let PAGE_SIZE   = parseInt(localStorage.getItem('pageSize')) || 25;
   let selectedSessionIds = new Set();
+  let currentDetailSession = null;
 
   // Active filters
   let fSearch = '';
@@ -240,6 +237,129 @@
 
   function panelLoader(text = 'Loading…') {
     return `<div class="inline-loader-wrap"><div class="inline-loader"></div><div class="inline-loader-text">${esc(text)}</div></div>`;
+  }
+
+  async function copyTextToClipboard(text) {
+    const value = String(text || '');
+    if (!value) throw new Error('Nothing to copy');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(value);
+        return;
+      } catch (err) {
+        // Fall through to the textarea fallback below.
+      }
+    }
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (!ok) throw new Error('Clipboard copy failed');
+  }
+
+  function setCopyButtonState(btn, successText, resetText, failText = '❌ Failed') {
+    btn.textContent = successText;
+    setTimeout(() => { btn.textContent = resetText; }, 1400);
+    return true;
+  }
+
+  async function copyWithButton(text, btn, resetText, pendingText = '⏳ Copying…') {
+    try {
+      btn.textContent = pendingText;
+      await copyTextToClipboard(text);
+      setCopyButtonState(btn, '✅ Copied!', resetText);
+    } catch (err) {
+      console.error('Copy failed:', err);
+      btn.textContent = '❌ Failed';
+      setTimeout(() => { btn.textContent = resetText; }, 1400);
+    }
+  }
+
+  function buildIssueCopyText(issues) {
+    return (issues || []).map(issue =>
+      `[${issue.type || 'issue'}] ${issue.severity || 'medium'}\nField: ${issue.field || '—'}\n${issue.description || ''}\nExpected: ${issue.expected || '—'}\nActual: ${String(issue.actual || '—')}`
+    ).join('\n---\n');
+  }
+
+  function buildConversationCopyText(messages) {
+    return (messages || []).map(m => {
+      const role = (m.role || '').toLowerCase().includes('assistant') || (m.role || '').toLowerCase().includes('bot') ? 'Assistant' : 'User';
+      return `[${role}]: ${m.text || m.content || ''}`;
+    }).join('\n\n');
+  }
+
+  function buildResultJsonCopyText(json) {
+    if (!json || (typeof json === 'object' && !Object.keys(json).length)) return '';
+    return JSON.stringify(json, null, 2);
+  }
+
+  function getSelectedServiceKeys(session) {
+    const services = Array.isArray(session?.services) ? session.services.map(s => String(s || '').toLowerCase().trim()).filter(Boolean) : [];
+    const keys = new Set(services);
+    if (keys.has('transfer')) keys.add('transfer_vehicles');
+    return keys;
+  }
+
+  function filterReferenceDataByServices(refData, session) {
+    if (!refData || typeof refData !== 'object') return null;
+    const keys = getSelectedServiceKeys(session);
+    if (!keys.size) return refData;
+
+    const entries = Object.entries(refData).filter(([key]) => keys.has(String(key).toLowerCase()));
+    if (!entries.length) return {};
+
+    const filtered = Object.fromEntries(entries);
+    if (filtered.visa && typeof filtered.visa === 'object' && !Array.isArray(filtered.visa)) {
+      const { countries, ...visaRest } = filtered.visa;
+      filtered.visa = visaRest;
+    }
+    return filtered;
+  }
+
+  function buildReferenceDataCopyText(refData, session) {
+    const filtered = filterReferenceDataByServices(refData, session);
+    if (!filtered || !Object.keys(filtered).length) return 'No reference data available for selected services.';
+    return JSON.stringify(filtered, null, 2);
+  }
+
+  async function copyCurrentDetailBundle(btn) {
+    let s = currentDetailSession || sessions.find(x => x.session_id === document.getElementById('dpSessionId').textContent);
+    if (!s) return;
+    if (!s.conversation || !s.result_json || !s.analysis) {
+      const full = await getFullSessionForJson(s.session_id);
+      if (full) {
+        s = full;
+        currentDetailSession = full;
+      }
+    }
+
+    const analysis = s.analysis || {};
+    const issues = analysis.issues || [];
+    const sections = [];
+
+    sections.push(`Session ID: ${s.session_id || '—'}`);
+    sections.push(`=== Analysis ===`);
+    sections.push(`Overall: ${analysis.overall_status || '—'}`);
+    if (analysis.summary) sections.push(`Summary: ${analysis.summary}`);
+    if (issues.length) sections.push(`Issues:\n${buildIssueCopyText(issues)}`);
+    else sections.push('Issues: none');
+
+    sections.push(`=== Conversation ===`);
+    sections.push(buildConversationCopyText(s.conversation || []) || 'No conversation data.');
+
+    sections.push(`=== Result JSON ===`);
+    sections.push(buildResultJsonCopyText(s.result_json) || 'No result JSON data available.');
+
+    sections.push(`=== Reference Data (Selected Services Only) ===`);
+    sections.push(buildReferenceDataCopyText(s.reference_data, s));
+
+    await copyWithButton(sections.join('\n\n'), btn, 'Copy All Data', '⏳ Copying All Data…');
   }
 
   // ── Stats ──────────────────────────────────────────────────────────────────
@@ -521,6 +641,8 @@
     document.getElementById('loadMoreBtn').disabled = true;
     // Disable dropdown during load to prevent filter changes
     document.getElementById('itemsPerPageSelect').disabled = true;
+    document.getElementById('itemsPerPageCustom').disabled = true;
+    document.getElementById('itemsPerPageApply').disabled = true;
     try {
       await loadSessions(true);
     } finally {
@@ -528,6 +650,8 @@
       document.getElementById('loadMoreBtn').textContent = 'Load more';
       document.getElementById('loadMoreBtn').disabled = false;
       document.getElementById('itemsPerPageSelect').disabled = false;
+      document.getElementById('itemsPerPageCustom').disabled = false;
+      document.getElementById('itemsPerPageApply').disabled = false;
     }
   }
 
@@ -535,6 +659,8 @@
     const wrap = document.getElementById('loadMoreWrap');
     const btn  = document.getElementById('loadMoreBtn');
     const info = document.getElementById('loadMoreInfo');
+    const select = document.getElementById('itemsPerPageSelect');
+    const custom = document.getElementById('itemsPerPageCustom');
     
     if (!sessions.length) {
       wrap.style.display = 'none';
@@ -549,21 +675,69 @@
       btn.style.display = 'none';
       info.textContent = `All ${currentTotal} session${currentTotal !== 1 ? 's' : ''} shown`;
     }
+    if (select) select.disabled = _loadInProgress;
+    if (custom) custom.disabled = _loadInProgress;
+    const apply = document.getElementById('itemsPerPageApply');
+    if (apply) apply.disabled = _loadInProgress;
   }
 
   function setItemsPerPage(size) {
     if (_loadInProgress) {
       // Prevent changes during load - reset dropdown to current value
-      document.getElementById('itemsPerPageSelect').value = PAGE_SIZE.toString();
+      syncItemsPerPageControls(PAGE_SIZE);
       return;
     }
     const sizeNum = parseInt(size);
-    if (PAGE_SIZE === sizeNum) return;
+    if (!Number.isFinite(sizeNum) || sizeNum < 1) return;
+    if (PAGE_SIZE === sizeNum) {
+      syncItemsPerPageControls(sizeNum);
+      return;
+    }
     PAGE_SIZE = sizeNum;
     localStorage.setItem('pageSize', sizeNum.toString());
     currentOffset = 0;
     sessions = [];
+    syncItemsPerPageControls(sizeNum);
     loadSessions(false);
+  }
+
+  function syncItemsPerPageControls(size) {
+    const select = document.getElementById('itemsPerPageSelect');
+    const custom = document.getElementById('itemsPerPageCustom');
+    const apply = document.getElementById('itemsPerPageApply');
+    if (custom) custom.value = Number.isFinite(size) ? String(size) : '';
+    if (apply) apply.disabled = _loadInProgress;
+    if (!select) return;
+
+    const sizeStr = String(size);
+    const preset = [...select.options].find(o => o.value === sizeStr);
+    if (preset) {
+      select.value = sizeStr;
+      const existingCustom = [...select.options].find(o => o.value === 'custom');
+      if (existingCustom) existingCustom.remove();
+    } else {
+      let customOption = [...select.options].find(o => o.value === 'custom');
+      if (!customOption) {
+        customOption = document.createElement('option');
+        customOption.value = 'custom';
+        select.appendChild(customOption);
+      }
+      customOption.textContent = `Custom (${sizeStr})`;
+      select.value = 'custom';
+    }
+  }
+
+  function applyCustomItemsPerPage() {
+    const custom = document.getElementById('itemsPerPageCustom');
+    if (!custom) return;
+    setItemsPerPage(custom.value);
+  }
+
+  function handleItemsPerPageCustomKey(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      applyCustomItemsPerPage();
+    }
   }
 
   // ── Render table ────────────────────────────────────────────────────────────
@@ -654,7 +828,9 @@
   function updateCreateJsonBtn() {
     const btn = document.getElementById('createJsonBtn');
     const dismissBtn = document.getElementById('dismissSelectedBtn');
-    if (!btn && !dismissBtn) return;
+    const downloadBtn = document.getElementById('downloadSelectedBtn');
+    const promptsBtn = document.getElementById('downloadPromptsBtn');
+    if (!btn && !dismissBtn && !downloadBtn && !promptsBtn) return;
     const count = selectedSessionIds.size;
     if (btn) {
       btn.disabled = count === 0;
@@ -663,6 +839,14 @@
     if (dismissBtn) {
       dismissBtn.disabled = count === 0;
       dismissBtn.textContent = count > 0 ? `✓ Dismiss All Selected (${count})` : '✓ Dismiss All Selected';
+    }
+    if (downloadBtn) {
+      downloadBtn.disabled = count === 0;
+      downloadBtn.textContent = count > 0 ? `⬇ Download JSON (${count})` : '⬇ Download JSON';
+    }
+    if (promptsBtn) {
+      promptsBtn.disabled = count === 0;
+      promptsBtn.textContent = count > 0 ? `⬇ Download Prompts (${count})` : '⬇ Download Prompts';
     }
   }
 
@@ -694,6 +878,63 @@
     return words.join(' ') || 'Selected chat prompt';
   }
 
+  async function buildSelectedPromptsPayload(ids) {
+    const prompts = [];
+    const skipped = [];
+
+    for (let i = 0; i < ids.length; i += 1) {
+      const sessionId = ids[i];
+      const s = await getFullSessionForJson(sessionId);
+
+      const issues = s?.analysis?.issues || [];
+      const dismissed = s?.dismissed_issues || [];
+      const activeIssues = issues.filter((_, idx) => !dismissed.includes(idx));
+
+      if (activeIssues.length === 0 && document.querySelector(`input[type="checkbox"][class="row-check"]:checked`)?.closest('.tbl-row')?.dataset.sid === sessionId) {
+        skipped.push(sessionId.slice(0, 8));
+        const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input[class="row-check"]`);
+        if (checkbox) checkbox.checked = false;
+        continue;
+      }
+
+      const prompt = buildPromptFromConversation(s?.conversation || []);
+      let description = buildPromptDescription(prompt);
+      if (dismissed.length > 0) {
+        description += ` | ${dismissed.length} issue${dismissed.length > 1 ? 's' : ''} dismissed`;
+      }
+
+      prompts.push({
+        prompt_id: i + 1,
+        description,
+        prompt,
+      });
+    }
+
+    return { prompts, skipped };
+  }
+
+  function buildSelectedChatExport(session, order) {
+    const analysis = session.analysis || {};
+    const dismissed = session.dismissed_issues || [];
+    const issues = (analysis.issues || []).map((issue, index) => ({
+      ...issue,
+      dismissed: dismissed.includes(index),
+    }));
+    const referenceData = filterReferenceDataByServices(session.reference_data, session) || null;
+
+    return {
+      order,
+      session_id: session.session_id,
+      status: session.status || null,
+      analysis_status: session.analysis_status || analysis.overall_status || null,
+      summary: analysis.summary || null,
+      errors: issues,
+      conversation: session.conversation || [],
+      result_json: session.result_json || null,
+      reference_data: referenceData,
+    };
+  }
+
   async function createSelectedJson() {
     const btn = document.getElementById('createJsonBtn');
     const ids = [...selectedSessionIds];
@@ -704,40 +945,7 @@
     btn.innerHTML = '<span class="inline-loader inline-loader-sm"></span> Creating…';
 
     try {
-      const prompts = [];
-      const skipped = [];
-      
-      for (let i = 0; i < ids.length; i += 1) {
-        const sessionId = ids[i];
-        const s = await getFullSessionForJson(sessionId);
-        
-        // Validation: Skip if checked but has no errors (invalid selection)
-        const issues = s?.analysis?.issues || [];
-        const dismissed = s?.dismissed_issues || [];
-        const activeIssues = issues.filter((_, idx) => !dismissed.includes(idx));
-        
-        if (activeIssues.length === 0 && document.querySelector(`input[type="checkbox"][class="row-check"]:checked`)?.closest('.tbl-row')?.dataset.sid === sessionId) {
-          skipped.push(sessionId.slice(0, 8));
-          // Uncheck this row
-          const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input[class="row-check"]`);
-          if (checkbox) checkbox.checked = false;
-          continue;
-        }
-        
-        const prompt = buildPromptFromConversation(s?.conversation || []);
-        let description = buildPromptDescription(prompt);
-        
-        // Add dismissed message if there are dismissed issues
-        if (dismissed.length > 0) {
-          description += ` | ${dismissed.length} issue${dismissed.length > 1 ? 's' : ''} dismissed`;
-        }
-        
-        prompts.push({
-          prompt_id: i + 1,
-          description,
-          prompt,
-        });
-      }
+      const { prompts, skipped } = await buildSelectedPromptsPayload(ids);
 
       const res = await fetch('/api/export-prompts', {
         method: 'POST',
@@ -758,6 +966,90 @@
     } finally {
       btn.disabled = false;
       btn.textContent = originalText;
+      updateCreateJsonBtn();
+    }
+  }
+
+  async function downloadSelectedPromptsJson() {
+    const btn = document.getElementById('downloadPromptsBtn');
+    const ids = [...selectedSessionIds];
+    if (!ids.length) return;
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="inline-loader inline-loader-sm"></span> Downloading…';
+
+    try {
+      const { prompts, skipped } = await buildSelectedPromptsPayload(ids);
+      const blob = new Blob([JSON.stringify(prompts, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `chat-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      btn.textContent = '✅ Downloaded';
+      setTimeout(() => { btn.textContent = originalText; }, 1500);
+      if (skipped.length > 0) {
+        alert(`Downloaded ${prompts.length} prompt${prompts.length !== 1 ? 's' : ''}. Skipped ${skipped.length} invalid row${skipped.length > 1 ? 's' : ''}: ${skipped.join(', ')}`);
+      }
+    } catch (e) {
+      console.error('downloadSelectedPromptsJson error', e);
+      alert('Failed to download prompts JSON: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      updateCreateJsonBtn();
+    }
+  }
+
+  async function downloadSelectedJson() {
+    const btn = document.getElementById('downloadSelectedBtn');
+    const ids = [...selectedSessionIds];
+    if (!ids.length) return;
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="inline-loader inline-loader-sm"></span> Downloading…';
+    let succeeded = false;
+
+    try {
+      const chats = [];
+      for (let i = 0; i < ids.length; i += 1) {
+        const sessionId = ids[i];
+        const s = await getFullSessionForJson(sessionId);
+        if (!s) continue;
+        chats.push(buildSelectedChatExport(s, i + 1));
+      }
+
+      const payload = {
+        exported_at: new Date().toISOString(),
+        count: chats.length,
+        chats,
+      };
+
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `selected-chats-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      succeeded = true;
+      btn.textContent = '✅ Downloaded';
+      setTimeout(() => { btn.textContent = originalText; }, 1500);
+    } catch (e) {
+      console.error('downloadSelectedJson error', e);
+      alert('Failed to download JSON: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      if (!succeeded) btn.textContent = originalText;
       updateCreateJsonBtn();
     }
   }
@@ -843,10 +1135,14 @@
     }
   }
   function copyId(id, btn) {
-    navigator.clipboard.writeText(id).then(() => {
-      const orig = btn.textContent;
-      btn.textContent = '✓';
+    const orig = btn.textContent;
+    copyTextToClipboard(id).then(() => {
+      btn.textContent = '✅';
       btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+    }).catch(err => {
+      console.error('Copy failed:', err);
+      btn.textContent = '❌';
       setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
     });
   }
@@ -983,6 +1279,7 @@
   // ── Detail panel ─────────────────────────────────────────────────────────────
   async function openDetail(sessionId) {
     let s = sessions.find(x => x.session_id === sessionId);
+    currentDetailSession = s || null;
 
     // DB list rows omit conversation/result_json — always fetch full record if missing
     if (s && !s.conversation && !s.result_json) {
@@ -1011,6 +1308,7 @@
             normalized.effective_rating = memSession.effective_rating;
           }
           s = normalized;
+          currentDetailSession = s;
           const idx = sessions.findIndex(x => x.session_id === sessionId);
           if (idx >= 0) sessions[idx] = normalized;
         }
@@ -1037,6 +1335,7 @@
     document.getElementById('detailPanel').classList.remove('open');
     document.getElementById('overlay').classList.remove('open');
     document.body.style.overflow = '';
+    currentDetailSession = null;
   }
 
   function switchTab(btn, tab) {
@@ -1342,9 +1641,7 @@
       return `<div class="msg ${isBot?'bot':'user'}">
         <div class="msg-header">
           <span class="msg-role">${isBot ? '🤖 Assistant' : '👤 User'}</span>
-          <button class="copy-msg-btn" title="Copy message" onclick="
-            navigator.clipboard.writeText(document.getElementById('${mid}').textContent).then(()=>{this.textContent='✅';setTimeout(()=>this.textContent='⧉',1400)});
-          ">⧉</button>
+          <button class="copy-msg-btn" title="Copy message" onclick="copyWithButton(document.getElementById('${mid}').textContent, this, '⧉')">⧉</button>
         </div>
         <div class="msg-text" id="${mid}">${esc(text)}</div>
       </div>`;
@@ -1365,14 +1662,7 @@
   function copyConv(cid, btn) {
     const text = window[cid] || '';
     if (!text) { alert('No text to copy'); return; }
-    navigator.clipboard.writeText(text).then(() => {
-      btn.textContent = '✅ Copied!'; 
-      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
-    }).catch(err => {
-      console.error('Copy failed:', err);
-      btn.textContent = '❌ Failed'; 
-      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
-    });
+    copyWithButton(text, btn, '📋 Copy All');
   }
 
   function buildResultJson(json) {
@@ -1553,10 +1843,7 @@
       sec.querySelectorAll('.rd-tag').forEach(t => lines.push(t.textContent));
       lines.push('');
     });
-    navigator.clipboard.writeText(lines.join('\n')).then(() => {
-      btn.textContent = '✅ Copied!';
-      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
-    });
+    copyWithButton(lines.join('\n'), btn, '📋 Copy All');
   }
 
   function filterJson(id, query) {
@@ -1568,39 +1855,14 @@
   }
 
   function copyJson(id, btn) {
-    const text = btn.getAttribute('data-json') || '';
-    navigator.clipboard.writeText(text).then(() => {
-      btn.textContent = '✅ Copied!'; 
-      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
-    }).catch(() => {
-      // Fallback for non-HTTPS or blocked clipboard
-      const ta = document.createElement('textarea');
-      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      btn.textContent = '✅ Copied!'; 
-      setTimeout(() => btn.textContent = '📋 Copy All', 1500);
-    });
+    const text = window[id] || btn.getAttribute('data-json') || '';
+    copyWithButton(text, btn, '📋 Copy All');
   }
 
   function copyIssues(issuesId, btn) {
     const issues = window[issuesId] || [];
     if (!issues.length) { alert('No issues to copy'); return; }
-    
-    const lines = issues.map(issue => 
-      `[${issue.type||'issue'}] ${issue.severity||'medium'}\nField: ${issue.field||'—'}\n${issue.description||''}\nExpected: ${issue.expected||'—'}\nActual: ${String(issue.actual||'—')}`
-    );
-    const text = lines.join('\n---\n');
-    
-    navigator.clipboard.writeText(text).then(() => {
-      btn.textContent = '✅ Copied!'; 
-      setTimeout(() => btn.textContent = '📋 Copy', 1500);
-    }).catch(err => {
-      console.error('Copy failed:', err);
-      btn.textContent = '❌ Failed'; 
-      setTimeout(() => btn.textContent = '📋 Copy', 1500);
-    });
+    copyWithButton(buildIssueCopyText(issues), btn, '📋 Copy');
   }
 
   function filterAnalysis(containerId, query) {
@@ -1620,10 +1882,7 @@
 
   // ── Boot ─────────────────────────────────────────────────────────────────────
   // Sync dropdown to stored page size
-  const select = document.getElementById('itemsPerPageSelect');
-  if (select && PAGE_SIZE) {
-    select.value = PAGE_SIZE.toString();
-  }
+  syncItemsPerPageControls(PAGE_SIZE);
   
   loadStats();
   loadSessions(false);
