@@ -819,6 +819,48 @@ body.dark .all-good { background: #052e16; border-color: #166534; color: #6ee7b7
 .no-data { color: var(--text4); font-size: 13px; text-align: center; padding: 40px; }
 body.dark .no-data { color: #94a3b8; }
 
+.json-new-fields {
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.json-new-fields.empty {
+  color: var(--text3);
+  font-size: 12px;
+}
+.json-new-fields-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+.json-new-fields-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.json-new-field {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 12px;
+  color: var(--text);
+}
+.json-new-field code {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--sid-color);
+  font-size: 11px;
+}
+.json-new-field span {
+  color: var(--text2);
+  word-break: break-word;
+}
+
 /* ── JSON result tab ─────────────────────────────────────────────────────── */
 .json-toolbar {
   display: flex;

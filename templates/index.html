@@ -299,6 +299,58 @@
     return JSON.stringify(json, null, 2);
   }
 
+  function _isObjectLike(value) {
+    return value !== null && typeof value === 'object';
+  }
+
+  function collectNewFieldEntries(value, path = '', inNewBranch = false, out = []) {
+    if (Array.isArray(value)) {
+      value.forEach((item, idx) => {
+        const nextPath = `${path}[${idx}]`;
+        collectNewFieldEntries(item, nextPath, inNewBranch, out);
+      });
+      return out;
+    }
+
+    if (!_isObjectLike(value)) {
+      if (inNewBranch && path) {
+        out.push({ path, value });
+      }
+      return out;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      const nextPath = path ? `${path}.${key}` : key;
+      const isNewKey = /^(new_|custom_)/i.test(key);
+      const nextInNewBranch = inNewBranch || isNewKey;
+      if (_isObjectLike(child) || Array.isArray(child)) {
+        collectNewFieldEntries(child, nextPath, nextInNewBranch, out);
+      } else if (nextInNewBranch && child !== undefined) {
+        out.push({ path: nextPath, value: child });
+      }
+    }
+    return out;
+  }
+
+  function buildNewFieldsSummary(json) {
+    const entries = collectNewFieldEntries(json);
+    if (!entries.length) {
+      return '<div class="json-new-fields empty">No new/custom fields found.</div>';
+    }
+
+    return `
+      <div class="json-new-fields">
+        <div class="json-new-fields-title">New / custom fields</div>
+        <div class="json-new-fields-list">
+          ${entries.map(item => {
+            const raw = item.value === null ? 'null' : typeof item.value === 'object' ? JSON.stringify(item.value) : String(item.value);
+            const text = raw.length > 140 ? raw.slice(0, 140) + '…' : raw;
+            return `<div class="json-new-field"><code>${esc(item.path)}</code><span>${esc(text)}</span></div>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }
+
   function getSelectedServiceKeys(session) {
     const services = Array.isArray(session?.services) ? session.services.map(s => String(s || '').toLowerCase().trim()).filter(Boolean) : [];
     const keys = new Set(services);
@@ -1678,7 +1730,8 @@
       <span style="font-size:12px;color:var(--text4);">${Object.keys(json).length} top-level keys</span>
       <button class="btn-copy" id="copybtn-${id}" onclick="copyJson('${id}', this)" data-json="${esc(str)}">📋 Copy All</button>
     </div>
-    <pre id="${id}" class="json-pre">${esc(str)}</pre>`;
+    <pre id="${id}" class="json-pre">${esc(str)}</pre>
+    ${buildNewFieldsSummary(json)}`;
   }
 
   function buildReferenceData(refData) {
