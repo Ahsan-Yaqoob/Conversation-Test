@@ -235,6 +235,17 @@
     _processDismissQueue();
   }
 
+  async function _readApiError(res, fallbackMessage) {
+    const raw = await res.text();
+    if (!raw) return fallbackMessage;
+    try {
+      const data = JSON.parse(raw);
+      return data.detail || data.error || fallbackMessage;
+    } catch (_) {
+      return raw;
+    }
+  }
+
   function panelLoader(text = 'Loading…') {
     return `<div class="inline-loader-wrap"><div class="inline-loader"></div><div class="inline-loader-text">${esc(text)}</div></div>`;
   }
@@ -664,11 +675,8 @@
       // All dismissed → perfect score
       effective_rating = 10;
     } else if (dismissed.length && s.extractor_rating) {
-      const bonus = dismissed.reduce((sum, i) => {
-        const sev = (issues[i] || {}).severity;
-        return sum + (sev === 'high' ? 2 : 1);
-      }, 0);
-      effective_rating = Math.min(10, Math.max(1, s.extractor_rating + bonus));
+      const bonus = dismissed.length;
+      effective_rating = Math.min(9, Math.max(1, s.extractor_rating + bonus));
     }
     return {
       ...s,
@@ -942,9 +950,9 @@
       const dismissed = s?.dismissed_issues || [];
       const activeIssues = issues.filter((_, idx) => !dismissed.includes(idx));
 
-      if (activeIssues.length === 0 && document.querySelector(`input[type="checkbox"][class="row-check"]:checked`)?.closest('.tbl-row')?.dataset.sid === sessionId) {
+      if (activeIssues.length === 0 && document.querySelector('input.row-check:checked')?.closest('.tbl-row')?.dataset.sid === sessionId) {
         skipped.push(sessionId.slice(0, 8));
-        const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input[class="row-check"]`);
+        const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input.row-check`);
         if (checkbox) checkbox.checked = false;
         continue;
       }
@@ -1007,6 +1015,16 @@
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       
+      // Uncheck all selected sessions now that the operation completed
+      ids.forEach(sid => {
+        selectedSessionIds.delete(sid);
+        const checkbox = document.querySelector(`.tbl-row[data-sid="${sid}"] input.row-check`);
+        if (checkbox) checkbox.checked = false;
+      });
+      updateCreateJsonBtn();
+      syncSelectAllCheckbox();
+      renderTable(sessions);
+
       let msg = `Saved ${data.count} prompt${data.count !== 1 ? 's' : ''} to chat.json`;
       if (skipped.length > 0) {
         msg += `\n\n⚠️ Skipped ${skipped.length} row${skipped.length > 1 ? 's' : ''} with no errors checked: ${skipped.join(', ')}`;
@@ -1042,6 +1060,16 @@
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+
+      // Uncheck all selected sessions now that the operation completed
+      ids.forEach(sid => {
+        selectedSessionIds.delete(sid);
+        const checkbox = document.querySelector(`.tbl-row[data-sid="${sid}"] input.row-check`);
+        if (checkbox) checkbox.checked = false;
+      });
+      updateCreateJsonBtn();
+      syncSelectAllCheckbox();
+      renderTable(sessions);
 
       btn.textContent = '✅ Downloaded';
       setTimeout(() => { btn.textContent = originalText; }, 1500);
@@ -1094,6 +1122,17 @@
       URL.revokeObjectURL(url);
 
       succeeded = true;
+
+      // Uncheck all selected sessions now that the operation completed
+      ids.forEach(sid => {
+        selectedSessionIds.delete(sid);
+        const checkbox = document.querySelector(`.tbl-row[data-sid="${sid}"] input.row-check`);
+        if (checkbox) checkbox.checked = false;
+      });
+      updateCreateJsonBtn();
+      syncSelectAllCheckbox();
+      renderTable(sessions);
+
       btn.textContent = '✅ Downloaded';
       setTimeout(() => { btn.textContent = originalText; }, 1500);
     } catch (e) {
@@ -1152,7 +1191,7 @@
               
               // Uncheck immediately after success
               selectedSessionIds.delete(sessionId);
-              const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input[class="row-check"]`);
+              const checkbox = document.querySelector(`.tbl-row[data-sid="${sessionId}"] input.row-check`);
               if (checkbox) checkbox.checked = false;
               
             } catch (e) {
@@ -1448,14 +1487,15 @@
     </div>`;
 
     if (analysis.extractor_rating != null) {
-      // Show effective rating (original + dismissal bonus) if dismissals exist
+      // Show effective rating (original + 1 per dismissed issue).
+      // A perfect 10 is only possible when all issues are dismissed.
       const origR = analysis.extractor_rating;
-      const bonus = dismissedArr.reduce((acc, i) => {
-        const iss = issues[i];
-        return acc + (iss ? (iss.severity === 'high' ? 2 : 1) : 0);
-      }, 0);
+      const bonus = dismissedArr.length;
+      const computedRating = issues.length && dismissedArr.length === issues.length
+              ? 10
+              : Math.min(9, Math.max(1, origR + bonus));
       const r = s.effective_rating != null ? s.effective_rating
-              : Math.min(10, Math.max(1, origR + bonus));
+              : computedRating;
       const rCls = r>=8?'r-good':r>=5?'r-mid':'r-low';
       const changed = bonus > 0;
       html += `
@@ -1542,7 +1582,7 @@
       try {
         const url = `/api/db/sessions/${sessionId}/issues/${idx}${isCurrentlyDismissed ? '?restore=true' : ''}`;
         const res = await fetch(url, { method: 'PATCH' });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(await _readApiError(res, 'Failed to update issue'));
         const data = await res.json();
 
         // Update local session cache — keep original extractor_rating intact
@@ -1595,7 +1635,7 @@
       try {
         const url = `/api/db/sessions/${sessionId}/issues/dismiss-all${restore ? '?restore=true' : ''}`;
         const res = await fetch(url, { method: 'PATCH' });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(await _readApiError(res, 'Failed to dismiss all issues'));
         const data = await res.json();
 
         const s = sessions.find(x => x.session_id === sessionId);

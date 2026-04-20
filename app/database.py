@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -13,7 +14,20 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY', '')
 
 _client = None
 _client_lock = threading.Lock()
+_session_write_lock = threading.RLock()
 _table_missing_warned = False  # log the missing-table error only once
+
+
+class SessionDBError(Exception):
+    """Base error for session DB mutations."""
+
+
+class SessionNotFoundError(SessionDBError):
+    """The requested session does not exist in the DB or cache."""
+
+
+class SessionBusyError(SessionDBError):
+    """A transient DB failure occurred after retries."""
 
 
 def get_client():
@@ -36,6 +50,22 @@ def get_client():
 
 def is_available() -> bool:
     return get_client() is not None
+
+
+def _run_db_with_retry(operation, *, op_name: str, max_retries: int = 2, delay_seconds: float = 0.5):
+    """Retry transient DB operations with a short backoff."""
+    retry_count = 0
+    while retry_count <= max_retries:
+        try:
+            return operation()
+        except Exception as e:
+            retry_count += 1
+            if retry_count <= max_retries:
+                logger.warning(f"{op_name} (retry {retry_count}/{max_retries}): {e}")
+                time.sleep(delay_seconds * retry_count)
+                continue
+            logger.error(f"{op_name} (final): {e}")
+            raise SessionBusyError(f"{op_name} failed") from e
 
 
 def _row_from_session(data: dict) -> dict:
@@ -85,7 +115,11 @@ def upsert_session(data: dict, reset_dismissed: bool = False):
         # Clear old dismiss state so stale indices don't corrupt new analysis display
         if reset_dismissed:
             row['dismissed_issues'] = None
-        client.table('sessions').upsert(row, on_conflict='session_id').execute()
+        with _session_write_lock:
+            _run_db_with_retry(
+                lambda: client.table('sessions').upsert(row, on_conflict='session_id').execute(),
+                op_name=f"DB upsert [{data.get('session_id', '?')[:8]}]",
+            )
         _table_missing_warned = False  # reset on success
     except Exception as e:
         msg = str(e)
@@ -266,10 +300,9 @@ def _recompute_effective(issues: list, dismissed: list[int]) -> tuple[str | None
     Given the full issues list and dismissed indices, return
     (effective_status, effective_rating_adjustment).
     effective_status: 'ok' | 'warning' | 'error'
-    effective_rating: integer adjustment added to original rating (capped 1-10)
+    effective_rating: integer adjustment added to original rating
     """
     remaining = [iss for i, iss in enumerate(issues) if i not in dismissed]
-    dismissed_issues = [iss for i, iss in enumerate(issues) if i in dismissed]
 
     if any(i.get('severity') == 'high' for i in remaining):
         eff_status = 'error'
@@ -280,16 +313,9 @@ def _recompute_effective(issues: list, dismissed: list[int]) -> tuple[str | None
     else:
         eff_status = 'ok'
 
-    # Points recovered per dismissed issue
-    bonus = sum(
-        2 if i.get('severity') == 'high' else 1
-        for i in dismissed_issues
-    )
-    # When all issues are dismissed → perfect score
-    if not remaining:
-        eff_status = 'ok'
-        bonus = 10  # will be capped properly by caller
-    return eff_status, bonus
+    # Each dismissed issue recovers one rating point.
+    # A perfect 10 is only allowed when no active issues remain.
+    return eff_status, len(dismissed)
 
 
 def _ensure_session_in_db(client, session_id: str) -> bool:
@@ -309,57 +335,65 @@ def _ensure_session_in_db(client, session_id: str) -> bool:
     return False
 
 
-def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> dict | None:
-    """
-    Dismiss (or restore) a single issue by its index in analysis_issues.
-    Only updates dismissed_issues + analysis_status in DB.
-    extractor_rating is NEVER overwritten — effective rating is computed in frontend.
-    Returns updated fields dict on success, None on failure.
-    """
-    client = get_client()
-    if not client:
-        return None
-    try:
-        row = (
+def _get_session_issue_row(client, session_id: str) -> dict | None:
+    return _run_db_with_retry(
+        lambda: (
             client.table('sessions')
             .select('analysis_issues,extractor_rating,dismissed_issues')
             .eq('session_id', session_id)
             .maybe_single()
             .execute()
-        ).data
-        if not row:
-            # Session missing from DB — try to sync from cache then re-fetch
-            _ensure_session_in_db(client, session_id)
-            row = (
-                client.table('sessions')
-                .select('analysis_issues,extractor_rating,dismissed_issues')
-                .eq('session_id', session_id)
-                .maybe_single()
-                .execute()
-            ).data
-        if not row:
-            return None
+        ).data,
+        op_name=f"DB issue lookup [{session_id[:8]}]",
+    )
 
-        issues      = row.get('analysis_issues') or []
-        orig_rating = row.get('extractor_rating') or 0
-        dismissed   = list(row.get('dismissed_issues') or [])
 
-        if restore:
-            dismissed = [i for i in dismissed if i != issue_index]
-        else:
-            if issue_index not in dismissed:
-                dismissed.append(issue_index)
+def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> dict:
+    """
+    Dismiss (or restore) a single issue by its index in analysis_issues.
+    Only updates dismissed_issues + analysis_status in DB.
+    extractor_rating is NEVER overwritten — effective rating is computed in frontend.
+    Returns updated fields dict on success.
+    """
+    client = get_client()
+    if not client:
+        raise SessionBusyError('Database unavailable')
+    try:
+        with _session_write_lock:
+            row = _get_session_issue_row(client, session_id)
+            if not row:
+                # Session missing from DB — try to sync from cache then re-fetch
+                _ensure_session_in_db(client, session_id)
+                row = _get_session_issue_row(client, session_id)
+            if not row:
+                raise SessionNotFoundError(f"Session {session_id} not found")
 
-        eff_status, bonus = _recompute_effective(issues, dismissed)
-        # When all dismissed bonus==10 → always 10; otherwise cap normally
-        eff_rating = 10 if bonus == 10 else (min(10, max(1, orig_rating + bonus)) if orig_rating else None)
+            issues      = row.get('analysis_issues') or []
+            orig_rating = row.get('extractor_rating') or 0
+            dismissed   = list(row.get('dismissed_issues') or [])
 
-        update = {
-            'dismissed_issues': dismissed,
-            'analysis_status':  eff_status,
-            'db_updated_at':    datetime.now(timezone.utc).isoformat(),
-        }
-        client.table('sessions').update(update).eq('session_id', session_id).execute()
+            if restore:
+                dismissed = [i for i in dismissed if i != issue_index]
+            else:
+                if issue_index not in dismissed:
+                    dismissed.append(issue_index)
+
+            eff_status, bonus = _recompute_effective(issues, dismissed)
+            if orig_rating:
+                max_rating = 10 if len(dismissed) == len(issues) else 9
+                eff_rating = min(max_rating, max(1, orig_rating + bonus))
+            else:
+                eff_rating = None
+
+            update = {
+                'dismissed_issues': dismissed,
+                'analysis_status':  eff_status,
+                'db_updated_at':    datetime.now(timezone.utc).isoformat(),
+            }
+            _run_db_with_retry(
+                lambda: client.table('sessions').update(update).eq('session_id', session_id).execute(),
+                op_name=f"DB dismiss update [{session_id[:8]}]",
+            )
         logger.info(f"dismiss_issue {session_id[:8]}… idx={issue_index} restore={restore} → {eff_status} eff_rating={eff_rating}")
         # Sync back to cache so backfill never overwrites dismissed state
         try:
@@ -372,54 +406,52 @@ def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> d
             'orig_rating':      orig_rating,
             'effective_rating': eff_rating,
         }
+    except SessionDBError:
+        raise
     except Exception as e:
         logger.error(f"dismiss_issue error [{session_id[:8]}]: {e}")
-        return None
+        raise SessionBusyError('Unexpected dismiss issue error') from e
 
 
-def dismiss_all_issues(session_id: str, restore: bool = False) -> dict | None:
+def dismiss_all_issues(session_id: str, restore: bool = False) -> dict:
     """
     Dismiss all active issues at once (or restore all dismissed ones).
     Only updates dismissed_issues + analysis_status.  extractor_rating is never touched.
     """
     client = get_client()
     if not client:
-        return None
+        raise SessionBusyError('Database unavailable')
     try:
-        row = (
-            client.table('sessions')
-            .select('analysis_issues,extractor_rating,dismissed_issues')
-            .eq('session_id', session_id)
-            .maybe_single()
-            .execute()
-        ).data
-        if not row:
-            # Session missing from DB — try to sync from cache then re-fetch
-            _ensure_session_in_db(client, session_id)
-            row = (
-                client.table('sessions')
-                .select('analysis_issues,extractor_rating,dismissed_issues')
-                .eq('session_id', session_id)
-                .maybe_single()
-                .execute()
-            ).data
-        if not row:
-            return None
+        with _session_write_lock:
+            row = _get_session_issue_row(client, session_id)
+            if not row:
+                # Session missing from DB — try to sync from cache then re-fetch
+                _ensure_session_in_db(client, session_id)
+                row = _get_session_issue_row(client, session_id)
+            if not row:
+                raise SessionNotFoundError(f"Session {session_id} not found")
 
-        issues      = row.get('analysis_issues') or []
-        orig_rating = row.get('extractor_rating') or 0
+            issues      = row.get('analysis_issues') or []
+            orig_rating = row.get('extractor_rating') or 0
 
-        dismissed = [] if restore else list(range(len(issues)))
+            dismissed = [] if restore else list(range(len(issues)))
 
-        eff_status, bonus = _recompute_effective(issues, dismissed)
-        eff_rating = 10 if bonus == 10 else (min(10, max(1, orig_rating + bonus)) if orig_rating else None)
+            eff_status, bonus = _recompute_effective(issues, dismissed)
+            if orig_rating:
+                max_rating = 10 if len(dismissed) == len(issues) else 9
+                eff_rating = min(max_rating, max(1, orig_rating + bonus))
+            else:
+                eff_rating = None
 
-        update = {
-            'dismissed_issues': dismissed,
-            'analysis_status':  eff_status,
-            'db_updated_at':    datetime.now(timezone.utc).isoformat(),
-        }
-        client.table('sessions').update(update).eq('session_id', session_id).execute()
+            update = {
+                'dismissed_issues': dismissed,
+                'analysis_status':  eff_status,
+                'db_updated_at':    datetime.now(timezone.utc).isoformat(),
+            }
+            _run_db_with_retry(
+                lambda: client.table('sessions').update(update).eq('session_id', session_id).execute(),
+                op_name=f"DB dismiss-all update [{session_id[:8]}]",
+            )
         logger.info(f"dismiss_all {session_id[:8]}… restore={restore} → {eff_status} eff_rating={eff_rating}")
         # Sync back to cache so backfill never overwrites dismissed state
         try:
@@ -432,9 +464,11 @@ def dismiss_all_issues(session_id: str, restore: bool = False) -> dict | None:
             'orig_rating':      orig_rating,
             'effective_rating': eff_rating,
         }
+    except SessionDBError:
+        raise
     except Exception as e:
         logger.error(f"dismiss_all error [{session_id[:8]}]: {e}")
-        return None
+        raise SessionBusyError('Unexpected dismiss-all error') from e
 
 
 def check_table() -> bool:

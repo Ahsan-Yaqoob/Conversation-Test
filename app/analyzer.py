@@ -191,19 +191,21 @@ Carefully identify REAL errors only. Use the following rules strictly.
 **TRANSFER VEHICLE RULE (critical):**
 Each transfer object has a `supplier_mode` field: `"existing"` or `"new"`.
 
-- `supplier_mode = "existing"`: The vehicle is pre-registered in the system. Its specs (`luggage`, `transmission`, `pax_capacity`, `passengers_capacity`) are stored in the system database and are NOT captured in the JSON.
-  * **NEVER flag** `luggage`, `transmission`, `pax_capacity`, `passengers_capacity`, `luggage_capacity` as missing for existing-mode transfers — this is correct behaviour.
+- `supplier_mode = "existing"`: The vehicle is pre-registered in the system. Its specs (`luggage`, `transmission`, `pax_capacity`, `passengers_capacity`, `luggage_capacity`) are stored in the system database and are NOT expected in the JSON.
+  * **NEVER flag** these specs as missing for existing-mode transfers — this is correct behaviour.
 
-- `supplier_mode = "new"`: The user is defining a brand-new vehicle. Specs belong inside `new_vehicle_category` object:
+- `supplier_mode = "new"`: The user is defining a brand-new vehicle. Specs SHOULD be captured in the `new_vehicle_category` object where possible:
    * `passengers_capacity` → user's stated pax count
    * `luggage_capacity` → user's stated luggage count
    * `value` → vehicle category name (e.g. "Bus")
-   * If the user only stated pax/luggage/name for `new_vehicle_name`, do NOT treat that as a missing value for `new_vehicle_category`
+   * Implementations sometimes capture these specs in sibling vehicle-level fields (e.g., `vehicle_name_luggage_capacity`, `vehicle_name_passenger_capacity`, `vehicle_name_transmission_type`) or under `vehicle_category_*` paths. For correctness, treat a spec as captured if it appears anywhere in the vehicle object (either inside `new_vehicle_category` OR in these vehicle-level/vehicle_category fields).
+   * If the user only stated pax/luggage/name for `new_vehicle_name`, do NOT treat that as a missing value for `new_vehicle_category`.
    * **Only flag a spec as missing_field** when ALL THREE conditions are true:
      1. `supplier_mode = "new"`
      2. The user explicitly stated that value for the vehicle category in conversation (e.g. "pax 40", "luggage 2", "transmission Manual")
-     3. The field is absent or null inside `new_vehicle_category`
+     3. The field is absent or null in BOTH `new_vehicle_category` AND any vehicle-level/vehicle_category sibling fields (i.e. nowhere captured in the vehicle object)
    * If the user did NOT mention the value for the category, do NOT flag it regardless of what is in the JSON.
+   * If duplicate specs exist (present both in `new_vehicle_category` and in vehicle-level fields), prefer `new_vehicle_category` for interpretation but DO NOT flag duplicates as incorrect.
 
 **HOTEL COUNT RULE (critical):**
 - Count how many DISTINCT hotels the user mentioned (distinct = different hotel name OR different city OR different check-in/check-out dates)
@@ -296,6 +298,11 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 **CUSTOM / NEW VALUE RULE (critical):**
 - This applies to any service field that can have a custom/new value, such as hotel meal type, flight class/type, visa type, transfer type, or similar.
 - If the user explicitly gives a value that is not in the reference data, the AI may store it in an alternate `new_*` or custom field instead of the primary field.
+- Meal types (explicit guidance): If the user specified a custom meal (e.g., "Royal Breakfast") that is NOT present in reference data, the AI may capture it in one of two valid ways:
+  * directly in the primary field (e.g., `hotels[0].meal_type`) while the corresponding id field (e.g., `meal_type_id`) is missing or null, OR
+  * in an explicit `new_meal_type` / `custom_meal_type` field on the hotel object.
+  In either case, treat the meal as correctly captured and DO NOT flag it.
+- Do NOT map or truncate a custom meal name to a canonical meal (e.g., changing "Royal Breakfast" → "Breakfast"). If such truncation occurred and the original custom phrase does NOT appear anywhere in the capture path (primary field, `new_*`, or custom field), then flag as `wrong_value` (high severity).
 - Do NOT flag the primary field as wrong or missing if the same value is correctly captured in the matching `new_*` / custom field.
 - Only flag `missing_field` or `wrong_value` when the value is absent from BOTH the primary field and the related `new_*` / custom field for that item.
 - In short: if the custom value exists anywhere in its own capture path, it is correct and should not be flagged just because it is not in the main field.

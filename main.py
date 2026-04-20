@@ -309,13 +309,19 @@ async def dismiss_all_endpoint(session_id: str, restore: bool = False):
     Dismiss all active issues at once, or restore all dismissed ones.
     Pass ?restore=true to undo all dismissals.
     """
-    from app.database import dismiss_all_issues
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None, lambda: dismiss_all_issues(session_id, restore)
-    )
-    if result is None:
-        raise HTTPException(status_code=404, detail='Session not found or DB error')
+    from app.database import SessionBusyError, SessionNotFoundError, dismiss_all_issues
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, lambda: dismiss_all_issues(session_id, restore)
+        )
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail='Session not found')
+    except SessionBusyError:
+        raise HTTPException(
+            status_code=503,
+            detail='Database is busy. Please wait a moment and try again.',
+        )
 
     global _stats_cache_ts
     with _stats_lock:
@@ -338,13 +344,19 @@ async def dismiss_issue_endpoint(session_id: str, issue_index: int, restore: boo
     Recomputes effective analysis_status and extractor_rating.
     Pass ?restore=true to undo a dismissal.
     """
-    from app.database import dismiss_issue
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None, lambda: dismiss_issue(session_id, issue_index, restore)
-    )
-    if result is None:
-        raise HTTPException(status_code=404, detail='Session not found or DB error')
+    from app.database import SessionBusyError, SessionNotFoundError, dismiss_issue
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, lambda: dismiss_issue(session_id, issue_index, restore)
+        )
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail='Session not found')
+    except SessionBusyError:
+        raise HTTPException(
+            status_code=503,
+            detail='Database is busy. Please wait a moment and try again.',
+        )
 
     # Invalidate stats cache so next load reflects updated status
     global _stats_cache_ts
