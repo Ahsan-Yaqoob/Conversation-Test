@@ -17,6 +17,13 @@ _client_lock = threading.Lock()
 _session_write_lock = threading.RLock()
 _table_missing_warned = False  # log the missing-table error only once
 
+# Track which session IDs already have their full data (conversation/result_json/reference_data)
+# stored in Supabase. Populated on first DB write after startup. Prevents re-uploading large
+# blobs on every scrape cycle or restart.
+_db_stored_ids: set = set()
+_db_ids_loaded: bool = False
+_db_ids_lock = threading.Lock()
+
 
 class SessionDBError(Exception):
     """Base error for session DB mutations."""
@@ -50,6 +57,25 @@ def get_client():
 
 def is_available() -> bool:
     return get_client() is not None
+
+
+def _load_db_ids():
+    """Load all session IDs already stored in DB into the in-memory set (once per startup)."""
+    global _db_ids_loaded
+    client = get_client()
+    if not client:
+        return
+    try:
+        result = client.table('sessions').select('session_id').execute()
+        ids = {r['session_id'] for r in (result.data or []) if r.get('session_id')}
+        with _db_ids_lock:
+            _db_stored_ids.update(ids)
+            _db_ids_loaded = True
+        logger.info(f"DB ID cache loaded: {len(_db_stored_ids)} sessions already stored")
+    except Exception as e:
+        logger.warning(f"Failed to load DB session IDs: {e}")
+        with _db_ids_lock:
+            _db_ids_loaded = True  # mark loaded anyway to avoid repeated failures
 
 
 def _run_db_with_retry(operation, *, op_name: str, max_retries: int = 2, delay_seconds: float = 0.5):
@@ -99,7 +125,31 @@ def _row_from_session(data: dict) -> dict:
     return {k: v for k, v in row.items() if k in row}
 
 
-def upsert_session(data: dict, reset_dismissed: bool = False):
+def _meta_row_from_session(data: dict) -> dict:
+    """
+    Build a DB row with ONLY metadata and analysis fields — no large blob fields
+    (conversation, result_json, reference_data). Used for updates on already-stored sessions.
+    """
+    analysis = data.get('analysis') or {}
+    row = {
+        'session_id':         data.get('session_id'),
+        'status':             data.get('status'),
+        'services':           data.get('services'),
+        'msg_count':          data.get('msg_count'),
+        'scraped_at':         data.get('scraped_at'),
+        'session_created_at': data.get('created_at'),
+        'db_updated_at':      datetime.now(timezone.utc).isoformat(),
+    }
+    if analysis:
+        row.update({
+            'analysis_status':  analysis.get('overall_status'),
+            'analysis_summary': analysis.get('summary'),
+            'analysis_issues':  analysis.get('issues'),
+            'extractor_rating': analysis.get('extractor_rating'),
+            'rating_reason':    analysis.get('rating_reason'),
+            'analyzed_at':      analysis.get('analyzed_at'),
+        })
+    return {k: v for k, v in row.items() if v is not None}
     """
     Sync a session from the JSON cache to Supabase.
     reset_dismissed=True clears stale dismissed_issues when a fresh analysis is saved.
@@ -108,18 +158,44 @@ def upsert_session(data: dict, reset_dismissed: bool = False):
     client = get_client()
     if not client:
         return
+
+    session_id = data.get('session_id')
+    if not session_id:
+        return
+
+    # Ensure the in-memory set of already-stored IDs is populated
+    if not _db_ids_loaded:
+        _load_db_ids()
+
+    with _db_ids_lock:
+        already_stored = session_id in _db_stored_ids
+
     try:
-        row = _row_from_session(data)
-        if not row.get('session_id'):
-            return
-        # Clear old dismiss state so stale indices don't corrupt new analysis display
-        if reset_dismissed:
-            row['dismissed_issues'] = None
-        with _session_write_lock:
-            _run_db_with_retry(
-                lambda: client.table('sessions').upsert(row, on_conflict='session_id').execute(),
-                op_name=f"DB upsert [{data.get('session_id', '?')[:8]}]",
-            )
+        if already_stored:
+            # Session already has full data in DB — only update metadata/analysis fields.
+            # Never re-upload conversation/result_json/reference_data blobs.
+            row = _meta_row_from_session(data)
+            if reset_dismissed:
+                row['dismissed_issues'] = None
+            with _session_write_lock:
+                _run_db_with_retry(
+                    lambda: client.table('sessions').update(row).eq('session_id', session_id).execute(),
+                    op_name=f"DB meta-update [{session_id[:8]}]",
+                )
+        else:
+            # First time — do a full insert including all blob fields
+            row = _row_from_session(data)
+            if reset_dismissed:
+                row['dismissed_issues'] = None
+            with _session_write_lock:
+                _run_db_with_retry(
+                    lambda: client.table('sessions').upsert(row, on_conflict='session_id').execute(),
+                    op_name=f"DB full-insert [{session_id[:8]}]",
+                )
+            # Mark as fully stored so future calls skip blob re-upload
+            with _db_ids_lock:
+                _db_stored_ids.add(session_id)
+
         _table_missing_warned = False  # reset on success
     except Exception as e:
         msg = str(e)
@@ -133,7 +209,7 @@ def upsert_session(data: dict, reset_dismissed: bool = False):
                     "(This message will not repeat until the table is created.)"
                 )
         else:
-            logger.error(f"DB upsert error [{data.get('session_id', '?')[:8]}]: {e}")
+            logger.error(f"DB upsert error [{session_id[:8]}]: {e}")
 
 
 def get_session_db(session_id: str) -> dict | None:
@@ -472,13 +548,15 @@ def dismiss_all_issues(session_id: str, restore: bool = False) -> dict:
 
 
 def check_table() -> bool:
-    """Check if sessions table exists. Logs instructions if missing."""
+    """Check if sessions table exists and pre-load stored session IDs. Logs instructions if missing."""
     client = get_client()
     if not client:
         return False
     try:
         client.table('sessions').select('session_id').limit(1).execute()
         logger.info("Supabase sessions table: ✓ ready")
+        # Pre-load stored IDs so the first scrape/backfill knows what's already in DB
+        _load_db_ids()
         return True
     except Exception as e:
         msg = str(e)
@@ -494,14 +572,35 @@ def check_table() -> bool:
 
 
 def backfill_from_cache(cache: dict):
-    """Upsert all JSON cache sessions into DB — run once on startup."""
+    """
+    Sync JSON cache sessions into DB on startup.
+    - Sessions NOT yet in DB: full insert (conversation + result_json + reference_data).
+    - Sessions already in DB: skip entirely (data is already there — no re-upload).
+    Analysis updates for existing sessions happen naturally via upsert_session when
+    analysis completes.
+    """
     client = get_client()
     if not client or not cache:
         return
-    count = 0
+
+    # Load which sessions already exist in DB (populates _db_stored_ids)
+    if not _db_ids_loaded:
+        _load_db_ids()
+
+    with _db_ids_lock:
+        already_in_db = set(_db_stored_ids)
+
+    new_count = 0
     for data in cache.values():
-        if data.get('session_id'):
-            upsert_session(data)
-            count += 1
-    if count:
-        logger.info(f"DB backfill complete: {count} sessions synced")
+        sid = data.get('session_id')
+        if not sid:
+            continue
+        if sid in already_in_db:
+            continue  # Full data already stored — skip re-upload
+        upsert_session(data)
+        new_count += 1
+
+    if new_count:
+        logger.info(f"DB backfill complete: {new_count} new sessions inserted")
+    else:
+        logger.info("DB backfill: all sessions already stored, nothing to upload")

@@ -1982,7 +1982,7 @@
   setInterval(() => { loadSessions(false); loadStats(); }, 60000);
   startCountdown();
 
-  // Auto-fetch from API every 5 seconds (triggers full scrape cycle + updates UI)
+  // Auto-fetch from API every 5 minutes (triggers full scrape cycle + updates UI)
   setInterval(async () => {
     if (polling) return; // already in an active refresh cycle
     resetCountdown();
@@ -1990,7 +1990,7 @@
       const started = await fetch('/api/refresh', { method: 'POST' }).then(r => r.json()).catch(() => ({}));
       if (started.started) startPolling();
     } catch(e) {}
-  }, 5000);
+  }, 300000);
 
   // Always-on lightweight status poll: keeps auto-analysis spinners accurate
   async function syncAnalyzingIds(ids) {
