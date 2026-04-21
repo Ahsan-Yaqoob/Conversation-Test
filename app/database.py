@@ -150,6 +150,9 @@ def _meta_row_from_session(data: dict) -> dict:
             'analyzed_at':      analysis.get('analyzed_at'),
         })
     return {k: v for k, v in row.items() if v is not None}
+
+
+def upsert_session(data: dict, reset_dismissed: bool = False):
     """
     Sync a session from the JSON cache to Supabase.
     reset_dismissed=True clears stale dismissed_issues when a fresh analysis is saved.
