@@ -637,6 +637,9 @@
             if (memTs > dbTs) {
               nr.analysis = cached.analysis;
               if (cached.effective_rating !== undefined) nr.effective_rating = cached.effective_rating;
+            } else if (!nr.analysis.issues && cached.analysis.issues) {
+              // List response strips analysis_issues — preserve them from cache
+              nr.analysis = { ...nr.analysis, issues: cached.analysis.issues };
             }
           }
         }
@@ -667,27 +670,30 @@
   function normRow(s) {
     // DB rows use flat columns; UI expects nested analysis object
     if (s.analysis) return s;  // already nested (from cache fallback)
-    // Compute effective_rating from dismissed_issues + extractor_rating
+
     const dismissed = s.dismissed_issues || [];
-    const issues    = s.analysis_issues  || [];
+    // issue_count is sent by the list endpoint (analysis_issues stripped for bandwidth).
+    // analysis_issues is present when fetched via get_session_db (detail panel).
+    const issues     = s.analysis_issues ?? null;   // null = not loaded yet
+    const issueCount = s.issue_count ?? (issues ? issues.length : 0);
+
     let effective_rating = s.extractor_rating;
-    if (issues.length && dismissed.length === issues.length) {
-      // All dismissed → perfect score
+    if (issueCount > 0 && dismissed.length >= issueCount) {
       effective_rating = 10;
     } else if (dismissed.length && s.extractor_rating) {
-      const bonus = dismissed.length;
-      effective_rating = Math.min(9, Math.max(1, s.extractor_rating + bonus));
+      effective_rating = Math.min(9, Math.max(1, s.extractor_rating + dismissed.length));
     }
     return {
       ...s,
       effective_rating,
       analysis: s.analysis_status ? {
-        overall_status:  s.analysis_status,
-        summary:         s.analysis_summary,
-        issues,
+        overall_status:   s.analysis_status,
+        summary:          s.analysis_summary,
+        issues,           // null when loaded from list (stripped); real array from detail fetch
+        issue_count:      issueCount,
         extractor_rating: s.extractor_rating,
-        rating_reason:   s.rating_reason,
-        analyzed_at:     s.analyzed_at,
+        rating_reason:    s.rating_reason,
+        analyzed_at:      s.analyzed_at,
       } : null,
     };
   }
@@ -823,7 +829,11 @@
       const cfg    = AI_CFG[aiKey] || AI_CFG.pending;
       const issues = analysis.issues || [];
       const dismissed  = s.dismissed_issues || [];
-      const activeCount = issues.filter((_, i) => !dismissed.includes(i)).length;
+      // When issues aren't loaded (list view), derive count from issue_count integer
+      const totalIssueCount = analysis.issue_count ?? issues.length;
+      const activeCount = issues.length
+        ? issues.filter((_, i) => !dismissed.includes(i)).length
+        : Math.max(0, totalIssueCount - dismissed.length);
       const summary = analysis.summary || (s.scrape_error ? '⚠ Fetch error: ' + s.scrape_error : '—');
       const services = (s.services || []).map(sv => `<span title="${sv}">${SVC_ICONS[sv]||sv}</span>`).join('');
       const statusCls = (s.status||'').toLowerCase() === 'completed' ? 'completed' : 'active';
@@ -1280,12 +1290,12 @@
     const check = async () => {
       attempt++;
       try {
-        const r = await fetch(`/api/sessions/${sessionId}`).then(res => res.json());
-        if (r && r.analysis && r.analysis.overall_status) {
-          const s = sessions.find(x => x.session_id === sessionId);
-          if (s) { s.analysis = r.analysis; }
+        // Use lightweight status endpoint — avoids downloading the full conversation on every poll
+        const r = await fetch(`/api/sessions/${sessionId}/status`).then(res => res.json());
+        if (r && r.analyzed) {
           autoAnalyzingIds.delete(sessionId);
-          renderTable(sessions);
+          // Reload list to get updated analysis from DB (one call vs. 30 heavy polls)
+          await loadSessions(false);
           loadStats();
           const panelId = document.getElementById('dpSessionId').textContent;
           if (panelId === sessionId && document.getElementById('detailPanel').classList.contains('open')) {
@@ -1328,7 +1338,8 @@
     polling = setInterval(async () => {
       // Skip polling if we're in the middle of a "Load more" operation
       if (_loadInProgress) return;
-      await loadSessions(false);
+      // Only check job status — avoid fetching the full session list every 3 seconds.
+      // stopRefreshing() calls loadSessions() once when the job finishes.
       const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
       syncAnalyzingIds(d.analyzing || []);
       if (!d.running) stopRefreshing();
@@ -1372,8 +1383,8 @@
     let s = sessions.find(x => x.session_id === sessionId);
     currentDetailSession = s || null;
 
-    // DB list rows omit conversation/result_json — always fetch full record if missing
-    if (s && !s.conversation && !s.result_json) {
+    // DB list rows omit conversation/result_json and strip analysis_issues — fetch full record when needed
+    if (s && (!s.conversation && !s.result_json || (s.analysis?.overall_status && !s.analysis?.issues))) {
       // Show panel immediately with a loading state while we fetch
       document.getElementById('dpSessionId').textContent = sessionId;
       document.getElementById('tabConversation').innerHTML = panelLoader('Loading conversation…');
@@ -1979,7 +1990,7 @@
   
   loadStats();
   loadSessions(false);
-  setInterval(() => { loadSessions(false); loadStats(); }, 60000);
+  setInterval(() => { loadSessions(false); loadStats(); }, 180000); // 3-minute background refresh
   startCountdown();
 
   // Auto-fetch from API every 5 minutes (triggers full scrape cycle + updates UI)

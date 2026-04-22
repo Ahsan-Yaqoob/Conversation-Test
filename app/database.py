@@ -252,6 +252,7 @@ def list_sessions(
     
     while retry_count <= max_retries:
         try:
+            # Fetch analysis_issues to compute count, but strip it before sending to browser
             cols = (
                 'session_id,status,services,msg_count,scraped_at,session_created_at,'
                 'analysis_status,analysis_summary,analysis_issues,'
@@ -276,7 +277,15 @@ def list_sessions(
                 q = q.gte('session_created_at', week_ago)
 
             result = q.order('session_created_at', desc=True, nullsfirst=False).range(offset, offset + limit - 1).execute()
-            return result.data or [], result.count or 0
+
+            # Strip large blob fields — replace analysis_issues with a count integer.
+            # The full issues array is only needed in the detail panel (fetched via get_session_db).
+            rows = []
+            for row in (result.data or []):
+                row['issue_count'] = len(row.get('analysis_issues') or [])
+                row.pop('analysis_issues', None)
+                rows.append(row)
+            return rows, result.count or 0
         except Exception as e:
             retry_count += 1
             if retry_count <= max_retries:
@@ -290,8 +299,18 @@ def list_sessions(
 
 
 
+_stats_cache: dict = {}
+_stats_cache_time: float = 0.0
+_STATS_CACHE_TTL = 300  # seconds — stats are aggregate counts, 5-minute freshness is fine
+
+
 def get_stats_db() -> dict:
-    """Return aggregate counts for the dashboard stats bar."""
+    """Return aggregate counts for the dashboard stats bar (cached 5 min)."""
+    global _stats_cache, _stats_cache_time
+    import time as _time
+    if _stats_cache and (_time.monotonic() - _stats_cache_time) < _STATS_CACHE_TTL:
+        return _stats_cache
+
     client = get_client()
     if not client:
         return {}
@@ -341,7 +360,7 @@ def get_stats_db() -> dict:
             month_analyzed   = month_ok + month_err
             month_pct        = round(month_ok / month_analyzed * 100) if month_analyzed else 0
 
-            return {
+            computed = {
                 'total':           _count(),
                 'today':           today_total,
                 'ok':              _count(eq_analysis_status='ok'),
@@ -362,6 +381,10 @@ def get_stats_db() -> dict:
                 'month_ok':        month_ok,
                 'month_analyzed':  month_analyzed,
             }
+            import time as _time2
+            _stats_cache.update(computed)
+            _stats_cache_time = _time2.monotonic()
+            return computed
         except Exception as e:
             retry_count += 1
             if retry_count <= max_retries:

@@ -118,6 +118,21 @@ async def analyze_one(session_id: str):
     return {'analysis': analysis, 'cached': False}
 
 
+@app.get('/api/sessions/{session_id}/status')
+async def get_session_analysis_status(session_id: str):
+    """Lightweight endpoint: returns only analysis completion state (for polling)."""
+    from app.cache import get_session
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail='Session not found')
+    analysis = session.get('analysis') or {}
+    return {
+        'session_id': session_id,
+        'analysis_status': analysis.get('overall_status'),
+        'analyzed': bool(analysis.get('overall_status')),
+    }
+
+
 @app.get('/api/sessions/{session_id}')
 async def get_session_by_id(session_id: str):
     """Return a single session from cache (for polling analysis completion)."""
