@@ -344,6 +344,20 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
 4. **SAME-PAX COLLAPSING: qty_Xpax ALWAYS = SUM of all same-pax room counts — NEVER "pick one".**
    When multiple room types share the same pax capacity (e.g. Twin=2pax + Double=2pax, or Quad=4pax + Delux11=4pax), the correct `qty_Xpax` value is the SUM of their counts. Example: "1 Double 1 Twin" → `qty_2pax = 2` (NOT 1). Example: "2 Twin 3 Double" → `qty_2pax = 5`. NEVER flag `qty_Xpax = SUM` as wrong. NEVER say "pick one" or "store only one". If the JSON shows `qty_2pax = 2` for "1 Double 1 Twin", that is CORRECT — do NOT flag it.
 
+**REDUNDANT QUESTION RULE (AI conversation quality check):**
+- Read the full conversation and identify every question the AI asked the user.
+- For each AI question, check whether the user had ALREADY provided that information earlier in the conversation (before the AI asked).
+- If the AI asked for information that the user had ALREADY clearly stated → flag as `wrong_value` with severity `medium`.
+  * Field: use `conversation.ai_behavior` as the field path
+  * Expected: "AI should not ask for already-provided information"
+  * Actual: Describe what information was asked again and where the user had already provided it
+  * Example: User said "I need 2 rooms" at message 2, then AI asked "How many rooms do you need?" at message 6 → flag it
+- Do NOT flag if:
+  * The AI is asking for CLARIFICATION on an ambiguous or incomplete earlier answer (e.g. user said "some rooms" without a number)
+  * The AI is CONFIRMING details back to the user (e.g. "You mentioned 2 rooms, is that correct?") — confirmation is acceptable
+  * The information was given very early and the AI is re-checking due to a conversation restart or context switch
+- This check is about AI EFFICIENCY and USER EXPERIENCE — the AI should never make users repeat themselves.
+
 Return ONLY a valid JSON object — no markdown, no extra text:
 {{
   "overall_status": "ok",
