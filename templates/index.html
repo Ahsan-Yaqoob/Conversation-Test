@@ -1347,10 +1347,11 @@
     setTimeout(stopRefreshing, 180000);
   }
 
+  const AUTO_FETCH_INTERVAL_MS = 300000; // 5 minutes — matches the setInterval below
   let _countdownTimer = null;
-  let _nextFetchAt = Date.now() + 5000;
+  let _nextFetchAt = Date.now() + AUTO_FETCH_INTERVAL_MS;
 
-  function resetCountdown() { _nextFetchAt = Date.now() + 5000; }
+  function resetCountdown() { _nextFetchAt = Date.now() + AUTO_FETCH_INTERVAL_MS; }
 
   function startCountdown() {
     if (_countdownTimer) clearInterval(_countdownTimer);
