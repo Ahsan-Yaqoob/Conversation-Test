@@ -59,6 +59,12 @@ def is_available() -> bool:
     return get_client() is not None
 
 
+def is_session_stored(session_id: str) -> bool:
+    """Return True if this session's full blobs are already in the DB."""
+    with _db_ids_lock:
+        return session_id in _db_stored_ids
+
+
 def _load_db_ids():
     """Load all session IDs already stored in DB into the in-memory set (once per startup)."""
     global _db_ids_loaded
@@ -482,7 +488,8 @@ def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> d
 
             eff_status, bonus = _recompute_effective(issues, dismissed)
             if orig_rating:
-                max_rating = 10 if len(dismissed) == len(issues) else 9
+                # All dismissed (or no issues) → allow 10; active issues remain → cap at 9
+                max_rating = 10 if len(dismissed) >= len(issues) else 9
                 eff_rating = min(max_rating, max(1, orig_rating + bonus))
             else:
                 eff_rating = None
@@ -492,10 +499,7 @@ def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> d
                 'analysis_status':  eff_status,
                 'db_updated_at':    datetime.now(timezone.utc).isoformat(),
             }
-            _run_db_with_retry(
-                lambda: client.table('sessions').update(update).eq('session_id', session_id).execute(),
-                op_name=f"DB dismiss update [{session_id[:8]}]",
-            )
+
         logger.info(f"dismiss_issue {session_id[:8]}… idx={issue_index} restore={restore} → {eff_status} eff_rating={eff_rating}")
         # Sync back to cache so backfill never overwrites dismissed state
         try:
@@ -540,7 +544,8 @@ def dismiss_all_issues(session_id: str, restore: bool = False) -> dict:
 
             eff_status, bonus = _recompute_effective(issues, dismissed)
             if orig_rating:
-                max_rating = 10 if len(dismissed) == len(issues) else 9
+                # All dismissed (or no issues) → allow 10; active issues remain → cap at 9
+                max_rating = 10 if len(dismissed) >= len(issues) else 9
                 eff_rating = min(max_rating, max(1, orig_rating + bonus))
             else:
                 eff_rating = None

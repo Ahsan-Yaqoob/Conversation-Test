@@ -10,6 +10,15 @@ CACHE_FILE = DATA_DIR / 'sessions.json'
 ORDER_FILE = DATA_DIR / 'latest_order.json'
 
 _lock = threading.Lock()
+_cache: dict | None = None  # in-memory cache — loaded once, updated in place
+
+
+_BLOB_KEYS = ('conversation', 'result_json', 'reference_data')
+
+
+def _strip_blobs(data: dict) -> dict:
+    """Remove large blob fields — they're stored in Supabase, no need to keep in RAM."""
+    return {k: v for k, v in data.items() if k not in _BLOB_KEYS}
 
 
 def _ensure_dir():
@@ -18,7 +27,7 @@ def _ensure_dir():
 
 # ── sessions cache ────────────────────────────────────────────────────────────
 
-def load_cache() -> dict:
+def _load_from_disk() -> dict:
     _ensure_dir()
     if not CACHE_FILE.exists():
         return {}
@@ -29,7 +38,16 @@ def load_cache() -> dict:
             return {}
 
 
+def load_cache() -> dict:
+    global _cache
+    if _cache is None:
+        _cache = _load_from_disk()
+    return _cache
+
+
 def _save_cache(cache: dict):
+    global _cache
+    _cache = cache  # keep in-memory copy in sync
     _ensure_dir()
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
@@ -58,8 +76,17 @@ def save_session(session_id: str, data: dict, reset_dismissed: bool = False):
         _save_cache(cache)
     # Sync to Supabase outside the lock (non-blocking, best-effort)
     try:
-        from app.database import upsert_session
+        from app.database import upsert_session, is_session_stored
         upsert_session(data, reset_dismissed=reset_dismissed)
+        # Strip blobs from RAM once analysis is done and data is safely in DB.
+        # Blobs are only needed for analysis; the detail panel fetches them from DB on demand.
+        overall = (data.get('analysis') or {}).get('overall_status', '')
+        if overall in ('ok', 'warning', 'error') and is_session_stored(session_id):
+            with _lock:
+                c = load_cache()
+                if session_id in c:
+                    c[session_id] = _strip_blobs(c[session_id])
+                    _save_cache(c)
     except Exception as e:
         logger.warning(f"DB sync skipped for {session_id[:8]}: {e}")
 
@@ -75,13 +102,15 @@ def is_cached(session_id: str) -> bool:
 def get_cached_ids() -> set:
     """
     Return IDs of sessions that should NOT be re-fetched:
-    - completed sessions that already have conversation/result data
+    - completed sessions that already have data (blobs may have been stripped after DB upload)
     """
     cache = load_cache()
     skip = set()
     for sid, data in cache.items():
         status = (data.get('status') or '').lower()
-        has_data = data.get('conversation') or data.get('result_json')
+        # has_data: blobs present OR already stripped (analysis done → blobs removed)
+        has_data = (data.get('conversation') or data.get('result_json')
+                    or data.get('analysis'))
         if status == 'completed' and has_data:
             skip.add(sid)
     return skip
@@ -97,7 +126,9 @@ def get_cache_snapshot() -> dict:
         sid: {
             'status': (data.get('status') or '').lower(),
             'msg_count': data.get('msg_count', 0) or 0,
-            'has_data': bool(data.get('conversation') or data.get('result_json')),
+            # blobs may be stripped after analysis — treat as having data if analysis exists
+            'has_data': bool(data.get('conversation') or data.get('result_json')
+                             or data.get('analysis')),
         }
         for sid, data in cache.items()
     }

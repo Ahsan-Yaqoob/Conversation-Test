@@ -678,10 +678,10 @@
     const issueCount = s.issue_count ?? (issues ? issues.length : 0);
 
     let effective_rating = s.extractor_rating;
-    if (issueCount > 0 && dismissed.length >= issueCount) {
-      effective_rating = 10;
-    } else if (dismissed.length && s.extractor_rating) {
-      effective_rating = Math.min(9, Math.max(1, s.extractor_rating + dismissed.length));
+    if (s.extractor_rating) {
+      // All dismissed (or no issues) → allow 10; active issues remain → cap at 9
+      const maxRating = (dismissed.length >= issueCount) ? 10 : 9;
+      effective_rating = Math.min(maxRating, Math.max(1, s.extractor_rating + dismissed.length));
     }
     return {
       ...s,

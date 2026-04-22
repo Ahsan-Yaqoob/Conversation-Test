@@ -49,6 +49,20 @@ def run_analysis_safe(session_id: str, session_data: dict) -> dict | None:
             logger.info(f"Session {session_id[:8]} already analyzed, skipping.")
             return existing
 
+        # Blobs may have been stripped from RAM after a prior analysis.
+        # Fetch them from DB so we can re-analyze.
+        if not session.get('conversation') and not session.get('result_json'):
+            try:
+                from app.database import get_session_db
+                db_data = get_session_db(session_id)
+                if db_data and (db_data.get('conversation') or db_data.get('result_json')):
+                    session = {**session,
+                               'conversation': db_data.get('conversation'),
+                               'result_json': db_data.get('result_json'),
+                               'reference_data': db_data.get('reference_data')}
+            except Exception as fetch_err:
+                logger.warning(f"Could not fetch blobs from DB for {session_id[:8]}: {fetch_err}")
+
         if not session.get('conversation') and not session.get('result_json'):
             logger.info(f"Session {session_id[:8]} has no data to analyze.")
             return None
