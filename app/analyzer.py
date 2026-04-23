@@ -337,6 +337,7 @@ The following words are PAX-SIZE DESCRIPTORS that describe room capacity:
   * Example: user says "1 Triple, 1 Delux, 1 Premium" → if all have different pax from DB → 3 distinct → extra_beds = 2
   * IMPORTANT: If you cannot find a room type's pax in the reference data, do NOT guess its pax capacity — skip flagging extra_beds in that case
   * Flag as wrong_value (high) ONLY if extra_beds clearly doesn't match the formula AND you have confirmed pax capacities from the reference data for all room types mentioned
+  * **"NO EXTRA BED" OVERRIDE EXCEPTION (critical):** If the user explicitly says "no extra bed" BUT `room_quantities` in the JSON contains more than one distinct pax entry (e.g. qty_1pax AND qty_2pax both present), do NOT flag extra_beds as wrong. The extra_beds value in this case is system-derived from the multi-room-type structure — it is not a physical extra bed the user rejected. "No extra bed" from the user only applies when room_quantities has a single pax type; in that case extra_beds must be 0.
 - Extra bed CHARGE rule:
   * If the user explicitly states an extra bed price → that exact price must be used → flag wrong_value if different
   * If the user does NOT state a price → system calculates: (price of 2nd/higher room type) minus (price of 1st/lower room type)
