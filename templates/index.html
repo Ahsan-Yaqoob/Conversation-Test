@@ -1342,7 +1342,7 @@
       // stopRefreshing() calls loadSessions() once when the job finishes.
       const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
       syncAnalyzingIds(d.analyzing || []);
-      if (!d.running) stopRefreshing();
+      if (!d.running) { stopRefreshing(); if ((d.analyzing||[]).length > 0) _startAnalysisPoll(); }
     }, 3000);
     setTimeout(stopRefreshing, 180000);
   }
@@ -2028,15 +2028,31 @@
     }
   }
 
-  setInterval(async () => {
-    if (polling) return; // startPolling already calls status every 3s
-    const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
-    if ((d.analyzing || []).length > 0 || autoAnalyzingIds.size > 0) {
+  // Lightweight status poll — only runs when sessions are actively being analyzed.
+  // Starts when analysis begins, stops automatically when queue clears.
+  let _analysisPollInterval = null;
+
+  function _startAnalysisPoll() {
+    if (_analysisPollInterval) return;
+    _analysisPollInterval = setInterval(async () => {
+      if (polling) return; // startPolling already handles this during a scrape
+      const d = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
       await syncAnalyzingIds(d.analyzing || []);
-      // Also reload sessions to pick up freshly-written analysis results
-      if (autoAnalyzingIds.size === 0) loadSessions(false);
-    }
-  }, 3000);
+      if (autoAnalyzingIds.size === 0 && (d.analyzing || []).length === 0) {
+        // Nothing left analyzing — stop polling, reload table once
+        clearInterval(_analysisPollInterval);
+        _analysisPollInterval = null;
+        loadSessions(false);
+      }
+    }, 5000);
+  }
+
+  // Patch syncAnalyzingIds to auto-start/stop the poll
+  const _origSyncAnalyzingIds = syncAnalyzingIds;
+  syncAnalyzingIds = async function(ids) {
+    await _origSyncAnalyzingIds(ids);
+    if (autoAnalyzingIds.size > 0 && !polling) _startAnalysisPoll();
+  };
 </script>
 
 </body>

@@ -499,6 +499,10 @@ def dismiss_issue(session_id: str, issue_index: int, restore: bool = False) -> d
                 'analysis_status':  eff_status,
                 'db_updated_at':    datetime.now(timezone.utc).isoformat(),
             }
+            _run_db_with_retry(
+                lambda: client.table('sessions').update(update).eq('session_id', session_id).execute(),
+                op_name=f"DB dismiss update [{session_id[:8]}]",
+            )
 
         logger.info(f"dismiss_issue {session_id[:8]}… idx={issue_index} restore={restore} → {eff_status} eff_rating={eff_rating}")
         # Sync back to cache so backfill never overwrites dismissed state
