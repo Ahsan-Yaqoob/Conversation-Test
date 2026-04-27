@@ -11,3 +11,7 @@ data/latest_order.json
 *.log
 .DS_Store
 Thumbs.db
+
+diag_db.py
+diag_fetch.py
+
