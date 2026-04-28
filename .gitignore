@@ -19,3 +19,4 @@ diag_fetch.py
 
 diag_missing_blobs.py
 repair_missing_blobs.py
+diag_repair_one.py
