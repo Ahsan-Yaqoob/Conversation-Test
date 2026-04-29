@@ -58,15 +58,20 @@ def run_scrape_and_analyze():
 
         new_count = 0
         to_analyze = []  # sessions to auto-analyze after saving
-        _cached_created_sync = []  # collect small updates and apply in batch
 
         for session in sessions:
             session_id = session['session_id']
             if session.get('is_cached'):
-                # Defer syncing session_created_at for cached sessions — collect and batch upsert later
+                # Sync session_created_at for cached sessions if missing in DB
                 created_at = session.get('created_at')
                 if created_at:
-                    _cached_created_sync.append({'session_id': session_id, 'session_created_at': created_at})
+                    try:
+                        from app.database import get_client
+                        get_client().table('sessions').update(
+                            {'session_created_at': created_at}
+                        ).eq('session_id', session_id).is_('session_created_at', 'null').execute()
+                    except Exception:
+                        pass
                 continue
             # Merge: preserve existing analysis + dismissed state + original scraped_at
             from app.cache import get_session
@@ -113,17 +118,6 @@ def run_scrape_and_analyze():
                 logger.warning(f"DB analysis-check skipped: {e}")
 
         logger.info(f"── Fetch complete. {new_count} saved, {len(to_analyze)} queued for auto-analysis. ──")
-
-        # Apply any collected small created_at syncs in a single upsert to reduce DB requests
-        if _cached_created_sync:
-            try:
-                from app.database import get_client
-                client = get_client()
-                if client:
-                    logger.info(f"Batch-upserting {len(_cached_created_sync)} cached created_at values")
-                    client.table('sessions').upsert(_cached_created_sync, on_conflict='session_id').execute()
-            except Exception as e:
-                logger.warning(f"Batch created_at sync failed: {e}")
 
         # Spawn one background thread per session to analyze (concurrency-safe via lock in analyzer)
         for sid, sess in to_analyze:

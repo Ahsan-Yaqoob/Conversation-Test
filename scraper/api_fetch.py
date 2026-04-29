@@ -28,13 +28,6 @@ _BASE_URL = os.getenv(
 _API_KEY = os.getenv('xi-apeit-key', '')
 _TIMEOUT = 30
 
-# Log configured endpoints (do NOT log API key)
-try:
-    logger.info('Sessions API base URL: %s', _BASE_URL)
-    logger.info('Sessions API key present: %s', bool(_API_KEY))
-except Exception:
-    pass
-
 
 def _headers() -> dict:
     return {
@@ -110,31 +103,23 @@ def _normalize(item: dict, detail: dict | None) -> dict:
 
 def fetch_session_list() -> list[dict]:
     """Fetch the full list of sessions (metadata only) — single request."""
-    try:
-        with httpx.Client(timeout=_TIMEOUT) as client:
-            logger.info('Fetching session list from %s', _BASE_URL)
-            resp = client.get(_BASE_URL, headers=_headers())
-            logger.info('Session list HTTP %s, bytes=%s', resp.status_code, len(resp.content or b''))
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as e:
-        logger.error('Session list fetch failed from %s: %s', _BASE_URL, e, exc_info=True)
-        return []
+    with httpx.Client(timeout=_TIMEOUT) as client:
+        resp = client.get(_BASE_URL, headers=_headers())
+        resp.raise_for_status()
+        data = resp.json()
     sessions = data.get('sessions') or data.get('data') or []
-    logger.info('API returned %d sessions', len(sessions))
+    logger.info(f"API returned {len(sessions)} sessions")
     return sessions
 
 
 async def _fetch_detail_async(client: httpx.AsyncClient, session_id: str) -> dict | None:
     """Fetch one session's full detail asynchronously."""
     try:
-        url = f'{_BASE_URL}/{session_id}'
-        resp = await client.get(url, headers=_headers())
-        logger.info('Detail fetch %s HTTP %s bytes=%s', session_id[:8], resp.status_code, len(resp.content or b''))
+        resp = await client.get(f'{_BASE_URL}/{session_id}', headers=_headers())
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        logger.error(f"Detail fetch failed for {session_id[:8]}: {e}", exc_info=True)
+        logger.error(f"Detail fetch failed for {session_id[:8]}: {e}")
         return None
 
 
@@ -201,11 +186,10 @@ def fetch_new_sessions(cached_ids: set | None = None, cache_snapshot: dict | Non
 
         to_fetch_items.append(item)
 
-    skipped_ids = [r['session_id'] for r in cached_results]
-    to_fetch_ids = [it['session_id'] for it in to_fetch_items]
-    logger.info('%d skipped (no change), %d need detail fetch (parallel)', len(cached_results), len(to_fetch_items))
-    logger.debug('Skipped IDs: %s', skipped_ids)
-    logger.debug('To-fetch IDs: %s', to_fetch_ids)
+    logger.info(
+        f"{len(cached_results)} skipped (no change), "
+        f"{len(to_fetch_items)} need detail fetch (parallel)"
+    )
 
     # Fetch all uncached/changed session details in parallel
     new_results = []
