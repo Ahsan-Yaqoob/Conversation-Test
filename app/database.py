@@ -66,27 +66,18 @@ def is_session_stored(session_id: str) -> bool:
 
 
 def _load_db_ids():
-    """Load session IDs that have full blobs (conversation + result_json) into the in-memory set.
-
-    Only sessions that actually contain both conversation and result_json are considered "stored"
-    to avoid treating metadata-only rows as fully uploaded.
-    """
+    """Load all session IDs already stored in DB into the in-memory set (once per startup)."""
     global _db_ids_loaded
     client = get_client()
     if not client:
         return
     try:
-        # Fetch session_id along with blob presence and filter in Python to avoid false positives
-        result = client.table('sessions').select('session_id,conversation,result_json').execute()
-        ids = {
-            r['session_id']
-            for r in (result.data or [])
-            if r.get('session_id') and r.get('conversation') and r.get('result_json')
-        }
+        result = client.table('sessions').select('session_id').execute()
+        ids = {r['session_id'] for r in (result.data or []) if r.get('session_id')}
         with _db_ids_lock:
             _db_stored_ids.update(ids)
             _db_ids_loaded = True
-        logger.info(f"DB ID cache loaded: {len(_db_stored_ids)} sessions with blobs")
+        logger.info(f"DB ID cache loaded: {len(_db_stored_ids)} sessions already stored")
     except Exception as e:
         logger.warning(f"Failed to load DB session IDs: {e}")
         with _db_ids_lock:
@@ -210,11 +201,9 @@ def upsert_session(data: dict, reset_dismissed: bool = False):
                     lambda: client.table('sessions').upsert(row, on_conflict='session_id').execute(),
                     op_name=f"DB full-insert [{session_id[:8]}]",
                 )
-            # Mark as fully stored so future calls skip blob re-upload.
-            # Only mark as stored if full blobs actually exist in the row (prevents metadata-only rows from blocking repairs).
+            # Mark as fully stored so future calls skip blob re-upload
             with _db_ids_lock:
-                if row.get('conversation') or row.get('result_json'):
-                    _db_stored_ids.add(session_id)
+                _db_stored_ids.add(session_id)
 
         _table_missing_warned = False  # reset on success
     except Exception as e:
