@@ -160,13 +160,19 @@ def fetch_new_sessions(cached_ids: set | None = None, cache_snapshot: dict | Non
         api_msg_count = item.get('msg_count') or 0
 
         # Completed + already have data → skip entirely
+        # But if previous fetch had error or missing blobs, do NOT skip
         if session_id in cached_ids:
-            cached_results.append({
-                'session_id': session_id,
-                'is_cached': True,
-                'created_at': item.get('created_at'),
-            })
-            continue
+            snap = cache_snapshot.get(session_id, {})
+            if not snap.get('has_data') or snap.get('fetch_error'):
+                # Force re-fetch if missing data or had fetch error
+                pass
+            else:
+                cached_results.append({
+                    'session_id': session_id,
+                    'is_cached': True,
+                    'created_at': item.get('created_at'),
+                })
+                continue
 
         # Active session we've seen before — skip if nothing changed
         if session_id in cache_snapshot:
@@ -205,4 +211,8 @@ def fetch_new_sessions(cached_ids: set | None = None, cache_snapshot: dict | Non
     all_results = cached_results + new_results
     all_results.sort(key=lambda s: id_order.get(s['session_id'], 9999))
 
+    # Mark sessions with fetch_error for retry on next fetch
+    for s in all_results:
+        if s.get('fetch_error') or (not s.get('conversation') and not s.get('result_json')):
+            s['is_cached'] = False
     return all_results
