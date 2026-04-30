@@ -2071,23 +2071,35 @@ function retryFetchConversation() {
   fetch(`/api/sessions/${sid}`)
     .then(r => r.json())
     .then(data => {
-      if (loader) loader.style.visibility = 'hidden';
-      if (retryBtn) retryBtn.disabled = false;
       if (data.conversation && data.conversation.length) {
+        if (loader) loader.style.visibility = 'hidden';
+        if (retryBtn) retryBtn.disabled = false;
         showDetailPanel(sid, data);
       } else {
         fetch(`/api/db/sessions/${sid}`)
           .then(r => r.json())
           .then(dbData => {
-            if (loader) loader.style.visibility = 'hidden';
-            if (retryBtn) retryBtn.disabled = false;
             if (dbData.conversation && dbData.conversation.length) {
+              if (loader) loader.style.visibility = 'hidden';
+              if (retryBtn) retryBtn.disabled = false;
               showDetailPanel(sid, dbData);
             } else {
+              if (loader) loader.style.visibility = 'hidden';
+              if (retryBtn) retryBtn.disabled = false;
               alert('No conversation found in API or DB.');
             }
+          })
+          .catch(() => {
+            if (loader) loader.style.visibility = 'hidden';
+            if (retryBtn) retryBtn.disabled = false;
+            alert('Error fetching from DB.');
           });
       }
+    })
+    .catch(() => {
+      if (loader) loader.style.visibility = 'hidden';
+      if (retryBtn) retryBtn.disabled = false;
+      alert('Error fetching from API.');
     });
 }
 
