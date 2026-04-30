@@ -64,7 +64,7 @@ def run_analysis_safe(session_id: str, session_data: dict) -> dict | None:
                 logger.warning(f"Could not fetch blobs from DB for {session_id[:8]}: {fetch_err}")
 
         if not session.get('conversation') and not session.get('result_json'):
-            logger.info(f"Session {session_id[:8]} has no data to analyze.")
+            logger.info(f"Session {session_id[:8]} has no data to analyze. Analysis will not run.")
             return None
 
         analysis = analyze_session(session)

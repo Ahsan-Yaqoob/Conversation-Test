@@ -77,11 +77,16 @@ def save_session(session_id: str, data: dict, reset_dismissed: bool = False):
     # Sync to Supabase outside the lock (non-blocking, best-effort)
     try:
         from app.database import upsert_session, is_session_stored
-        upsert_session(data, reset_dismissed=reset_dismissed)
-        # Strip blobs from RAM once analysis is done and data is safely in DB.
-        # Blobs are only needed for analysis; the detail panel fetches them from DB on demand.
+        # Only strip blobs if upsert succeeds
+        upsert_success = False
+        try:
+            upsert_session(data, reset_dismissed=reset_dismissed)
+            upsert_success = True
+        except Exception as e:
+            logger.warning(f"DB sync skipped for {session_id[:8]}: {e}")
+        # Strip blobs from RAM only if analysis is done and data is safely in DB.
         overall = (data.get('analysis') or {}).get('overall_status', '')
-        if overall in ('ok', 'warning', 'error') and is_session_stored(session_id):
+        if upsert_success and overall in ('ok', 'warning', 'error') and is_session_stored(session_id):
             with _lock:
                 c = load_cache()
                 if session_id in c:
@@ -89,6 +94,8 @@ def save_session(session_id: str, data: dict, reset_dismissed: bool = False):
                     _save_cache(c)
     except Exception as e:
         logger.warning(f"DB sync skipped for {session_id[:8]}: {e}")
+        # Do NOT strip blobs if upsert failed
+
 
 
 def get_session(session_id: str) -> dict | None:
