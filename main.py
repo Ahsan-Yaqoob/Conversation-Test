@@ -389,6 +389,14 @@ async def dismiss_issue_endpoint(session_id: str, issue_index: int, restore: boo
     }
 
 
+@app.get('/api/test-crash')
+async def test_crash():
+    """Monitoring test only — kills the process so Render marks service as crashed. Remove after testing."""
+    import os
+    logger.warning("TEST CRASH triggered — process exiting now")
+    os._exit(1)
+
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run('main:app', host='0.0.0.0', port=8000, reload=False)
